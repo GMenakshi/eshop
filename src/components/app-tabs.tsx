@@ -2,7 +2,7 @@ import { Tabs, router } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { Pressable, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-
+import { BlurView } from "expo-blur";
 import { FloatingCart } from "@/components/floating-cart";
 import { ThemedText } from "@/components/themed-text";
 import { useAuth } from "@/context/auth-context";
@@ -53,7 +53,8 @@ function CustomTabBar({ state, navigation }: any) {
       style={[styles.bottomArea, { paddingBottom: Math.max(insets.bottom, 8) }]}
     >
       <View style={styles.tabPill}>
-        {visibleRoutes.map(
+  <BlurView intensity={50} tint="light" style={StyleSheet.absoluteFill} />
+  {visibleRoutes.map(
           (route: { key: string; name: keyof typeof tabIcons }) => {
             const routeIndex = state.routes.findIndex(
               (entry: { key: string }) => entry.key === route.key,
@@ -81,7 +82,7 @@ function CustomTabBar({ state, navigation }: any) {
                 <SymbolView
                   name={tabIcons[route.name]}
                   size={22}
-                  tintColor={focused ? "#17211D" : "#26352E"}
+                  tintColor={focused ? "#17211D" : "#60646C"}  // was "#17211D" / "#26352E"
                 />
                 {route.name !== "index" && (
                   <ThemedText
@@ -119,33 +120,33 @@ function CustomTabBar({ state, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  bottomArea: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 6,
-    backgroundColor: "rgba(244, 244, 237, 0.65)",
-    backdropFilter: "blur(20px)",
-  },
-  tabPill: {
-    flex: 1,
-    minHeight: 66,
-    padding: 5,
-    borderRadius: 38,
-    backgroundColor: "rgba(255, 255, 255, 0.55)",
-    borderWidth: 1,
-    borderColor: "rgba(215, 224, 214, 0.5)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-around",
-    shadowColor: "#000000",
-    shadowOpacity: 0.08,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: -6 },
-    elevation: 12,
-  },
+bottomArea: {
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 10,
+  paddingHorizontal: 12,
+  paddingTop: 10,
+  paddingBottom: 6,
+  backgroundColor: "transparent",
+},
+tabPill: {
+  flex: 1,
+  minHeight: 66,
+  padding: 5,
+  borderRadius: 38,
+  overflow: "hidden",
+  backgroundColor: "rgba(255,255,255,0.85)", // ← add this
+  borderWidth: 1,
+  borderColor: "rgba(215, 224, 214, 0.5)",
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-around",
+  shadowColor: "#000000",
+  shadowOpacity: 0.08,
+  shadowRadius: 20,
+  shadowOffset: { width: 0, height: -6 },
+  elevation: 12,
+},
   tabItem: {
     minWidth: 64,
     minHeight: 62,
@@ -155,10 +156,8 @@ const styles = StyleSheet.create({
     gap: 3,
     paddingHorizontal: 7,
   },
-  tabItemActive: { backgroundColor: "#E8EFE7" },
-  tabLabel: { color: "#526057", fontSize: 10, fontWeight: "700" },
-  tabLabelActive: { color: "#3bb585", fontWeight: "900" },
-  profileButton: {
+tabItemActive: { backgroundColor: "#EDEFEC" }, 
+tabLabelActive: { color: "#17211D", fontWeight: "900" },   profileButton: {
     width: 56,
     height: 56,
     borderRadius: 38,
@@ -167,5 +166,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 2,
   },
+  tabLabel: { color: "#60646C", fontSize: 10, fontWeight: "700" },       // was "#526057"
   profileLabel: { color: "#FFFFFF", fontSize: 10, fontWeight: "900" },
 });

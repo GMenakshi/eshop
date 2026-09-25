@@ -26,6 +26,8 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useWishlist } from "@/context/wishlist-context";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import { BlurView } from "expo-blur";
 
 const imageBase = "https://api-palette-project.lovable.app/assets/";
 export type HomeProduct = {
@@ -99,6 +101,41 @@ const getCategoryIcon = (name: string) =>
   categoryIconMap[name] ?? categoryIconMap.default;
 
 const searchSuggestions = ["furniture", "kids", "storage", "lighting", "decor"];
+const recentSearchesKey = "recentSearches";
+const maxRecentSearches = 10;
+
+const parseRecentSearches = (storedValue: string | null): string[] => {
+  if (!storedValue) return [];
+
+  try {
+    const parsed: unknown = JSON.parse(storedValue);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0)
+      .slice(0, maxRecentSearches);
+  } catch {
+    return [];
+  }
+};
+
+const loadRecentSearches = async (): Promise<string[]> => {
+  try {
+    return parseRecentSearches(await AsyncStorage.getItem(recentSearchesKey));
+  } catch {
+    return [];
+  }
+};
+
+const saveRecentSearches = async (searches: string[]): Promise<void> => {
+  try {
+    await AsyncStorage.setItem(recentSearchesKey, JSON.stringify(searches));
+  } catch {
+    return;
+  }
+};
 
 
 export default function HomeScreen() {
@@ -114,6 +151,7 @@ export default function HomeScreen() {
   const [banners, setBanners] = useState<{ id: string; name: string; image: string }[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const [products, setProducts] = useState<HomeProduct[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [searchSuggestionIndex, setSearchSuggestionIndex] = useState(0);
@@ -317,6 +355,39 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
     setStickyHeaderOpacity(Math.min(y / 120, 1));
   };
 
+  const openSearch = async () => {
+    const storedSearches = await loadRecentSearches();
+    setRecentSearches(storedSearches);
+    setSearchOpen(true);
+  };
+
+  const submitSearch = async (value: string) => {
+    const normalizedValue = value.trim();
+    if (!normalizedValue) return;
+
+    const nextRecentSearches = [
+      normalizedValue,
+      ...recentSearches.filter(
+        (search) => search.toLowerCase() !== normalizedValue.toLowerCase(),
+      ),
+    ].slice(0, maxRecentSearches);
+
+    setRecentSearches(nextRecentSearches);
+    await saveRecentSearches(nextRecentSearches);
+    setQuery(normalizedValue);
+    setSearchOpen(false);
+  };
+
+  const selectRecentSearch = (value: string) => {
+    setQuery(value);
+    setSearchOpen(false);
+  };
+
+  const clearRecentSearches = async () => {
+    setRecentSearches([]);
+    await saveRecentSearches([]);
+  };
+
   const addProduct = async (product: HomeProduct) => {
     if (!token) {
       router.push("/sign-in");
@@ -469,67 +540,54 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
             </View>
           </View>
           <View
-            style={[
-              styles.stickySearchAndCategories,
-              {
-                backgroundColor: `rgba(244, 244, 237, ${0.08 + stickyBackgroundOpacity * 0.82})`,
-                borderBottomColor: `rgba(23, 33, 29, ${0.06 + stickyBackgroundOpacity * 0.3})`,
-              },
-              stickyBackgroundOpacity > 0 &&
-              styles.stickySearchAndCategoriesVisible,
-            ]}
-          >
-            {searchOpen ? (
-              <View style={styles.searchBox}>
-                <SymbolView
-                  name={{
-                    ios: "magnifyingglass",
-                    android: "search",
-                    web: "search",
-                  }}
-                  size={17}
-                  tintColor="#66706A"
-                />
-                <TextInput
-                  autoFocus
-                  value={query}
-                  onChangeText={setQuery}
-                  placeholder="Search the collection"
-                  placeholderTextColor="#7F8983"
-                  style={styles.searchInput}
-                />
-              </View>
-            ) : (
-              <View style={styles.searchPromptBar}>
-                <SymbolView
-                  name={{
-                    ios: "magnifyingglass",
-                    android: "search",
-                    web: "search",
-                  }}
-                  size={18}
-                  tintColor="#17211D"
-                />
+  style={[
+    styles.stickySearchAndCategories,
+    {
+      borderBottomColor: `rgba(23, 33, 29, ${0.06 + stickyBackgroundOpacity * 0.3})`,
+    },
+    stickyBackgroundOpacity > 0 &&
+    styles.stickySearchAndCategoriesVisible,
+  ]}
+>
+  <BlurView
+    intensity={Math.round(stickyBackgroundOpacity * 60)}
+    tint="light"
+    style={StyleSheet.absoluteFill}
+  />
+  <Pressable
+    style={[
+      styles.searchPromptBar,
+      { marginBottom: 10 - stickyBackgroundOpacity * 8 },
+    ]}
+              onPress={() => void openSearch()}
+              accessibilityLabel="Open search"
+            >
+              <SymbolView
+                name={{
+                  ios: "magnifyingglass",
+                  android: "search",
+                  web: "search",
+                }}
+                size={18}
+                tintColor="#17211D"
+              />
                 <TextInput
                   value={query}
-                  onChangeText={setQuery}
+                  editable={false}
+                  pointerEvents="none"
                   placeholder={`Search for "${searchSuggestions[searchSuggestionIndex]}"`}
                   placeholderTextColor="#7A847D"
                   style={styles.promptInput}
                 />
-                <Pressable
-                  style={styles.voiceButton}
-                  accessibilityLabel="Voice search"
-                >
-                  <SymbolView
-                    name={{ ios: "mic.fill", android: "mic", web: "mic" }}
-                    size={17}
-                    tintColor="#17211D"
-                  />
-                </Pressable>
+                <View style={styles.searchDivider} />
+                <View style={styles.voiceButton}>
+                <SymbolView
+                  name={{ ios: "mic.fill", android: "mic", web: "mic" }}
+                  size={17}
+                  tintColor="#17211D"
+                />
               </View>
-            )}
-
+            </Pressable>
             <View style={styles.categorySection}>
               <ScrollView
                 horizontal
@@ -554,29 +612,7 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
                           styles.categoryChipActive,
                       ]}
                     >
-                      <Animated.View style={{ opacity: categoryIconOpacity }}>
-                        {useImage ? (
-                          <Image
-                            source={{ uri: categoryImageUrl }}
-                            style={styles.categoryChipImage}
-                            contentFit="cover"
-                          />
-                        ) : useEmoji ? (
-                          <ThemedText style={styles.categoryEmoji}>
-                            {emojiIcon}
-                          </ThemedText>
-                        ) : (
-                          <SymbolView
-                            name={icon as any}
-                            size={20}
-                            tintColor={
-                              activeCategory === category.id
-                                ? "#17211D"
-                                : "#526057"
-                            }
-                          />
-                        )}
-                      </Animated.View>
+                      {null}
                       <ThemedText
                         style={[
                           styles.categoryText,
@@ -964,7 +1000,183 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
             </View>
           </View>
         )}
-      </SafeAreaView>
+              </SafeAreaView>
+      <Modal
+        visible={searchOpen}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setSearchOpen(false)}
+      >
+        <SafeAreaProvider>
+        <SafeAreaView style={styles.searchScreen}>
+          <View style={styles.searchScreenTopBar}>
+            <Pressable
+              onPress={() => setSearchOpen(false)}
+              accessibilityLabel="Close search"
+              style={styles.searchScreenClose}
+            >
+              <SymbolView
+                name={{ ios: "arrow.left", android: "arrow_back", web: "arrow_back" }}
+                size={22}
+                tintColor="#17211D"
+              />
+            </Pressable>
+            <View style={styles.searchScreenInputWrap}>
+              <SymbolView
+                name={{ ios: "magnifyingglass", android: "search", web: "search" }}
+                size={18}
+                tintColor="#748078"
+              />
+              <TextInput
+                autoFocus
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Search products"
+                placeholderTextColor="#748078"
+                returnKeyType="search"
+                onSubmitEditing={() => void submitSearch(query)}
+                style={styles.searchScreenInput}
+              />
+              <Pressable accessibilityLabel="Voice search">
+                <SymbolView
+                  name={{ ios: "mic.fill", android: "mic", web: "mic" }}
+                  size={17}
+                  tintColor="#748078"
+                />
+              </Pressable>
+            </View>
+          </View>
+
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.searchScreenScrollContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            <View style={styles.recentSearchesHeaderRow}>
+              <ThemedText style={styles.recentSearchesTitle}>
+                Recent Searches
+              </ThemedText>
+              {recentSearches.length > 0 && (
+                <Pressable onPress={() => void clearRecentSearches()}>
+                  <ThemedText style={styles.searchEditLink}>Edit</ThemedText>
+                </Pressable>
+              )}
+            </View>
+
+            {recentSearches.length === 0 ? (
+              <ThemedText style={styles.noRecentSearches}>
+                No recent searches
+              </ThemedText>
+            ) : (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.recentSearchesRow}
+              >
+                {recentSearches.map((search) => (
+                  <Pressable
+                    key={search}
+                    style={styles.recentSearchChip}
+                    onPress={() => selectRecentSearch(search)}
+                  >
+                    <View style={styles.recentSearchChipIcon}>
+                      <SymbolView
+                        name={{ ios: "clock", android: "history", web: "history" }}
+                        size={20}
+                        tintColor="#748078"
+                      />
+                    </View>
+                    <ThemedText style={styles.recentSearchChipLabel} numberOfLines={1}>
+                      {search}
+                    </ThemedText>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
+
+            {categories.length > 0 && (
+              <View style={styles.recommendedSection}>
+                <ThemedText style={styles.recentSearchesTitle}>
+                  Recommended Stores
+                </ThemedText>
+                <View style={styles.recommendedGrid}>
+                  {categories.slice(0, 3).map((category) => {
+                    const categoryImageUrl = category.image
+                      ? apiImageUrl(category.image)
+                      : undefined;
+                    return (
+                      <Pressable
+                        key={category.id}
+                        style={styles.recommendedCard}
+                        onPress={() => {
+                          setActiveCategory(category.id);
+                          setSearchOpen(false);
+                        }}
+                      >
+                        <View style={styles.recommendedImageBox}>
+                          {categoryImageUrl ? (
+                            <Image
+                              source={{ uri: categoryImageUrl }}
+                              style={styles.recommendedImage}
+                              contentFit="cover"
+                            />
+                          ) : (
+                            <SymbolView
+                              name={{ ios: "bag.fill", android: "shopping_bag", web: "shopping_bag" }}
+                              size={26}
+                              tintColor="#748078"
+                            />
+                          )}
+                        </View>
+                        <ThemedText style={styles.recommendedLabel} numberOfLines={1}>
+                          {category.name}
+                        </ThemedText>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+
+            {products.length > 0 && (
+              <View style={styles.trendingSection}>
+                <ThemedText style={styles.recentSearchesTitle}>
+                  Trending Today
+                </ThemedText>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.trendingRow}
+                >
+                  {products.slice(0, 6).map((product) => (
+                    <Pressable
+                      key={product.id}
+                      style={styles.trendingCard}
+                      onPress={() => {
+                        setSearchOpen(false);
+                        router.push({
+                          pathname: "/product/[id]",
+                          params: { id: product.id },
+                        });
+                      }}
+                    >
+                      <Image
+                        source={{ uri: product.image }}
+                        style={styles.trendingImage}
+                        contentFit="cover"
+                      />
+                      <ThemedText style={styles.trendingLabel} numberOfLines={2}>
+                        {product.name}
+                      </ThemedText>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
+          </ScrollView>
+          </SafeAreaView>
+          </SafeAreaProvider>
+      </Modal>
     </ThemedView>
   );
 }
@@ -1077,6 +1289,95 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 18,
   },
+  searchScreen: {
+    flex: 1,
+    backgroundColor: "#FFFFFF",
+  },
+  searchScreenHeader: {
+    height: 64,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    borderBottomWidth: 1,
+    borderBottomColor: "#E5E8E4",
+  },
+  searchScreenClose: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  searchScreenTitle: {
+    flex: 1,
+    color: "#17211D",
+    fontSize: 20,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  searchScreenHeaderAction: {
+    width: 40,
+  },
+  searchScreenInputRow: {
+    marginHorizontal: 20,
+    marginTop: 16,
+    marginBottom: 8,
+    minHeight: 52,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    backgroundColor: "#F4F4ED",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  searchScreenInput: {
+    flex: 1,
+    color: "#17211D",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  searchScreenClear: {
+    width: 32,
+    height: 32,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recentSearchesContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 24,
+  },
+  recentSearchesTitle: {
+    color: "#748078",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    marginBottom: 8,
+  },
+  noRecentSearches: {
+    color: "#748078",
+    fontSize: 15,
+    fontWeight: "600",
+    marginTop: 12,
+  },
+  recentSearchesList: {
+    gap: 2,
+    paddingBottom: 24,
+  },
+  recentSearchItem: {
+    minHeight: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#E5E8E4",
+  },
+  recentSearchText: {
+    flex: 1,
+    color: "#17211D",
+    fontSize: 15,
+    fontWeight: "600",
+  },
   stickySearchAndCategories: {
     backgroundColor: "rgba(244, 244, 237, 0)",
     marginHorizontal: -20,
@@ -1101,34 +1402,38 @@ const styles = StyleSheet.create({
     paddingBottom: 0,
   },
   searchInput: { flex: 1, color: "#17211D", fontSize: 14 },
-  searchPromptBar: {
-    backgroundColor: "rgba(255, 255, 255, 0.58)",
-    borderRadius: 100,
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.85)",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    height: 38,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginTop: 2,
-    marginBottom: 6,
-  },
+searchPromptBar: {
+  backgroundColor: "#FFFFFF",
+  borderRadius: 100,
+  paddingHorizontal: 16,
+  height: 52,
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 10,
+  marginTop: 2,
+  shadowColor: "rgba(23, 33, 29, 0.15)",
+  shadowOpacity: 1,
+  shadowRadius: 10,
+  shadowOffset: { width: 0, height: 4 },
+  elevation: 2,
+},
   promptInput: {
-    flex: 1,
-    color: "#17211D",
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  voiceButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: "#E9EFE7",
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  flex: 1,
+  color: "#17211D",
+  fontSize: 15,
+  fontWeight: "500",
+},
+  searchDivider: {
+  width: 1,
+  height: 22,
+  backgroundColor: "#E2E5E0",
+},
+voiceButton: {
+  width: 34,
+  height: 34,
+  alignItems: "center",
+  justifyContent: "center",
+},
   heroGifWrap: {
     marginTop: 4,
     marginBottom: 20,
@@ -1160,16 +1465,15 @@ const styles = StyleSheet.create({
   },
   categoryRow: { gap: 10, paddingBottom: 6, paddingTop: 4 },
   categoryChip: {
-    backgroundColor: "transparent",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 14,
-    minWidth: 72,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
-  },
-  categoryChipActive: { backgroundColor: "transparent" },
+  backgroundColor: "transparent",
+  paddingHorizontal: 14,
+  paddingVertical: 8,
+  minWidth: 76,
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+},
+categoryChipActive: { backgroundColor: "transparent" },
   categoryChipImage: {
     width: 32,
     height: 32,
@@ -1180,13 +1484,13 @@ const styles = StyleSheet.create({
     lineHeight: 24,
   },
   categoryText: {
-    fontSize: 11,
-    color: "#526057",
-    fontWeight: "700",
-    letterSpacing: 0.5,
-    textTransform: "uppercase",
-  },
-  categoryTextActive: { color: "#17211D" },
+  fontSize: 13,
+  color: "#17211D",
+  fontWeight: "700",
+  letterSpacing: 0,
+  textTransform: "none",
+},
+categoryTextActive: { color: "#000000", fontWeight: "800" },
   categoryDivider: {
     height: 1,
     backgroundColor: "rgba(23, 33, 29, 0.08)",
@@ -1621,4 +1925,163 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     letterSpacing: 1.2,
   },
+
+searchBackButton: {
+  width: 34,
+  height: 34,
+  alignItems: "center",
+  justifyContent: "center",
+},
+searchScreenInputWrap: {
+  flex: 1,
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 8,
+  backgroundColor: "#F1F3EF",
+  borderRadius: 100,
+  paddingHorizontal: 14,
+  height: 40,
+},
+
+searchScreenBody: {
+  flex: 1,
+  paddingHorizontal: 20,
+  paddingTop: 8,
+},
+searchScreenSectionLabel: {
+  fontSize: 11,
+  fontWeight: "800",
+  letterSpacing: 1,
+  textTransform: "uppercase",
+  color: "#8A948C",
+  marginBottom: 10,
+},
+searchScreenEmpty: {
+  paddingVertical: 40,
+  alignItems: "center",
+},
+searchScreenEmptyText: {
+  fontSize: 13,
+  color: "#8A948C",
+  fontWeight: "600",
+},
+recentSearchRow: {
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 10,
+  paddingVertical: 12,
+  borderBottomWidth: 1,
+  borderBottomColor: "#F0F0EE",
+},
+searchScreenTopBar: {
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 10,
+  paddingHorizontal: 16,
+  paddingVertical: 10,
+},
+searchScreenScrollContent: {
+  paddingHorizontal: 20,
+  paddingTop: 16,
+  paddingBottom: 40,
+},
+recentSearchesHeaderRow: {
+  flexDirection: "row",
+  justifyContent: "space-between",
+  alignItems: "center",
+  marginBottom: 12,
+},
+
+searchEditLink: {
+  fontSize: 14,
+  fontWeight: "700",
+  color: "#2E6BE6",
+},
+
+recentSearchesRow: {
+  gap: 14,
+  paddingBottom: 6,
+},
+recentSearchChip: {
+  alignItems: "center",
+  width: 76,
+},
+recentSearchChipIcon: {
+  width: 68,
+  height: 68,
+  borderRadius: 14,
+  backgroundColor: "#F1F3EF",
+  alignItems: "center",
+  justifyContent: "center",
+  marginBottom: 6,
+},
+recentSearchChipLabel: {
+  fontSize: 11,
+  fontWeight: "600",
+  color: "#17211D",
+  textAlign: "center",
+},
+recommendedSection: {
+  marginTop: 28,
+  backgroundColor: "#EAF2FB",
+  borderRadius: 20,
+  paddingHorizontal: 16,
+  paddingVertical: 18,
+  marginHorizontal: -4,
+},
+recommendedGrid: {
+  flexDirection: "row",
+  gap: 12,
+  marginTop: 12,
+},
+recommendedCard: {
+  flex: 1,
+  alignItems: "center",
+  backgroundColor: "#F5F6F3",
+  borderRadius: 16,
+  paddingVertical: 14,
+},
+recommendedImageBox: {
+  width: 56,
+  height: 56,
+  borderRadius: 28,
+  backgroundColor: "#FFFFFF",
+  alignItems: "center",
+  justifyContent: "center",
+  overflow: "hidden",
+  marginBottom: 8,
+},
+recommendedImage: {
+  width: "100%",
+  height: "100%",
+},
+recommendedLabel: {
+  fontSize: 12,
+  fontWeight: "700",
+  color: "#17211D",
+},
+trendingSection: {
+  marginTop: 28,
+},
+trendingRow: {
+  gap: 12,
+  marginTop: 12,
+  paddingBottom: 6,
+},
+trendingCard: {
+  width: 130,
+},
+trendingImage: {
+  width: 130,
+  height: 130,
+  borderRadius: 14,
+  backgroundColor: "#F0F0EE",
+  marginBottom: 8,
+},
+trendingLabel: {
+  fontSize: 12,
+  fontWeight: "700",
+  color: "#17211D",
+},
+
 });
