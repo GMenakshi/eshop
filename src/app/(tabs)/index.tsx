@@ -14,6 +14,7 @@ import { VideoView, useVideoPlayer } from "expo-video";
 import { useEffect, useState } from "react";
 import {
   Animated,
+  Modal,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Pressable,
