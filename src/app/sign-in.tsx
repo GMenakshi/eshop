@@ -1,3 +1,5 @@
+import { FontAwesome, Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 import { router, useLocalSearchParams } from "expo-router";
 import { useState } from "react";
 import {
@@ -16,15 +18,18 @@ import { ThemedText } from "@/components/themed-text";
 import { useAuth } from "@/context/auth-context";
 import { goBackOrHome } from "@/lib/navigation";
 
-const ink = "#17211D";
-const muted = "#748078";
-const field = "#E4ECE4";
+const ink = "#1C1B1F";
+const muted = "#8A8A93";
+const inputBg = "#F5F5F7";
+const primaryBlue = "#3D6DF2";
 
 export default function SignInScreen() {
   const { email: emailParam } = useLocalSearchParams<{ email?: string }>();
   const { signIn } = useAuth();
   const [email, setEmail] = useState(emailParam ?? "");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const handleSignIn = async () => {
@@ -33,7 +38,7 @@ export default function SignInScreen() {
     setLoading(true);
     try {
       await signIn(email.trim(), password);
-      router.replace("/profile");
+      router.replace("/");
     } catch (error) {
       Alert.alert(
         "Sign in failed",
@@ -45,139 +50,314 @@ export default function SignInScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.screen}>
-      <KeyboardAvoidingView behavior="padding" style={styles.keyboard}>
-        <ScrollView
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="on-drag"
-          showsVerticalScrollIndicator={false}
-        >
-          <Pressable
-            accessibilityLabel="Go back"
-            onPress={goBackOrHome}
-            style={styles.backButton}
+    <LinearGradient
+      colors={["#FDEBD6", "#F5E1EC", "#E9E3F7", "#E3E0F5"]}
+      locations={[0, 0.35, 0.7, 1]}
+      start={{ x: 0.1, y: 0 }}
+      end={{ x: 0.9, y: 1 }}
+      style={styles.screen}
+    >
+      <SafeAreaView style={styles.safeArea}>
+        <KeyboardAvoidingView behavior="padding" style={styles.keyboard}>
+          <ScrollView
+            contentContainerStyle={styles.content}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
           >
-            <ThemedText style={styles.backText}>Back</ThemedText>
-          </Pressable>
-          <ThemedText style={styles.eyebrow}>ESHOP / ACCOUNT</ThemedText>
-          <ThemedText style={styles.title}>Welcome{`\n`}back.</ThemedText>
-          <ThemedText style={styles.subtitle}>
-            Sign in to track orders and save your essentials.
-          </ThemedText>
-          <View style={styles.form}>
-            <ThemedText style={styles.label}>EMAIL</ThemedText>
-            <TextInput
-              autoCapitalize="none"
-              keyboardType="email-address"
-              placeholder="you@example.com"
-              placeholderTextColor={muted}
-              style={styles.input}
-              value={email}
-              onChangeText={setEmail}
-            />
-            <ThemedText style={styles.label}>PASSWORD</ThemedText>
-            <TextInput
-              secureTextEntry
-              placeholder="Enter your password"
-              placeholderTextColor={muted}
-              style={styles.input}
-              value={password}
-              onChangeText={setPassword}
-            />
             <Pressable
-              disabled={loading}
-              onPress={handleSignIn}
-              style={styles.primaryButton}
+              accessibilityLabel="Go back"
+              onPress={goBackOrHome}
+              style={styles.backButton}
             >
-              {loading ? (
-                <ActivityIndicator color="#F4F4ED" />
-              ) : (
-                <ThemedText style={styles.primaryText}>SIGN IN</ThemedText>
-              )}
+              <Ionicons name="chevron-back" size={22} color={ink} />
             </Pressable>
-          </View>
-          <View style={styles.footerRow}>
-            <ThemedText style={styles.footerText}>New to ESHOP?</ThemedText>
-            <Pressable onPress={() => router.push("/create-account")}>
-              <ThemedText style={styles.link}>Create account</ThemedText>
-            </Pressable>
-          </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+
+            <View style={styles.card}>
+              <View style={styles.iconBadge}>
+                <Ionicons name="shield-checkmark" size={26} color="#FFFFFF" />
+              </View>
+
+              <ThemedText style={styles.title}>Login</ThemedText>
+              <ThemedText style={styles.subtitle}>
+                Enter your email and password to log in
+              </ThemedText>
+
+              <View style={styles.form}>
+                <TextInput
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                  placeholder="Loisbecket@gmail.com"
+                  placeholderTextColor={muted}
+                  style={styles.input}
+                  value={email}
+                  onChangeText={setEmail}
+                />
+
+                <View style={styles.passwordWrap}>
+                  <TextInput
+                    secureTextEntry={!showPassword}
+                    placeholder="••••••"
+                    placeholderTextColor={muted}
+                    style={styles.passwordInput}
+                    value={password}
+                    onChangeText={setPassword}
+                  />
+                  <Pressable
+                    onPress={() => setShowPassword((v) => !v)}
+                    accessibilityLabel="Toggle password visibility"
+                    hitSlop={10}
+                  >
+                    <Ionicons
+                      name={showPassword ? "eye" : "eye-off"}
+                      size={20}
+                      color={muted}
+                    />
+                  </Pressable>
+                </View>
+
+                <View style={styles.optionsRow}>
+                  <Pressable
+                    style={styles.rememberRow}
+                    onPress={() => setRememberMe((v) => !v)}
+                  >
+                    <View
+                      style={[
+                        styles.checkbox,
+                        rememberMe && styles.checkboxChecked,
+                      ]}
+                    >
+                      {rememberMe && (
+                        <Ionicons name="checkmark" size={12} color="#FFFFFF" />
+                      )}
+                    </View>
+                    <ThemedText style={styles.rememberText}>
+                      Remember me
+                    </ThemedText>
+                  </Pressable>
+                  <Pressable>
+                    <ThemedText style={styles.forgotText}>
+                      Forgot Password ?
+                    </ThemedText>
+                  </Pressable>
+                </View>
+
+                <Pressable
+                  disabled={loading}
+                  onPress={handleSignIn}
+                  style={styles.primaryButton}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <ThemedText style={styles.primaryText}>Log In</ThemedText>
+                  )}
+                </Pressable>
+
+                <View style={styles.dividerRow}>
+                  <View style={styles.dividerLine} />
+                  <ThemedText style={styles.dividerText}>
+                    Or login with
+                  </ThemedText>
+                  <View style={styles.dividerLine} />
+                </View>
+
+                <View style={styles.socialRow}>
+                  <Pressable style={styles.socialButton}>
+                    <FontAwesome name="google" size={20} color="#EA4335" />
+                  </Pressable>
+                  <Pressable style={styles.socialButton}>
+                    <FontAwesome name="facebook" size={20} color="#1877F2" />
+                  </Pressable>
+                  <Pressable style={styles.socialButton}>
+                    <FontAwesome name="apple" size={22} color="#000000" />
+                  </Pressable>
+                  <Pressable style={styles.socialButton}>
+                    <Ionicons
+                      name="phone-portrait-outline"
+                      size={20}
+                      color={ink}
+                    />
+                  </Pressable>
+                </View>
+              </View>
+
+              <View style={styles.footerRow}>
+                <ThemedText style={styles.footerText}>
+                  Don&apos;t have an account?
+                </ThemedText>
+                <Pressable onPress={() => router.push("/create-account")}>
+                  <ThemedText style={styles.link}> Sign Up</ThemedText>
+                </Pressable>
+              </View>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#F4F4ED" },
+  screen: { flex: 1 },
+  safeArea: { flex: 1 },
   keyboard: { flex: 1 },
-  content: { flexGrow: 1, padding: 24, paddingBottom: 48 },
-  backButton: { alignSelf: "flex-start", marginBottom: 42 },
-  backText: {
-    color: ink,
-    fontSize: 13,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 1,
+  content: {
+    flexGrow: 1,
+    padding: 20,
+    justifyContent: "center",
+    paddingBottom: 48,
   },
-  eyebrow: {
-    color: muted,
-    fontSize: 10,
-    letterSpacing: 1.8,
-    fontWeight: "700",
+  backButton: {
+    position: "absolute",
+    top: 8,
+    left: 20,
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 10,
+  },
+  card: {
+    backgroundColor: "rgba(255,255,255,0.7)",
+    borderRadius: 28,
+    paddingHorizontal: 24,
+    paddingTop: 32,
+    paddingBottom: 24,
+    alignItems: "center",
+  },
+  iconBadge: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: "rgba(245, 185, 121, 1)",
+    alignItems: "center",
+    justifyContent: "center",
     marginBottom: 18,
   },
   title: {
-    color: ink,
-    fontSize: 44,
-    lineHeight: 43,
+    fontSize: 26,
     fontWeight: "800",
-    letterSpacing: -1.4,
+    color: ink,
   },
   subtitle: {
+    fontSize: 13,
     color: muted,
-    fontSize: 15,
-    lineHeight: 22,
-    marginTop: 18,
-    maxWidth: 300,
+    marginTop: 6,
+    textAlign: "center",
   },
-  form: { gap: 10, marginTop: 38 },
-  label: {
-    color: muted,
-    fontSize: 10,
-    letterSpacing: 1.6,
-    fontWeight: "700",
-    marginTop: 8,
+  form: {
+    width: "100%",
+    marginTop: 24,
+    gap: 12,
   },
   input: {
     height: 52,
-    backgroundColor: field,
-    borderRadius: 3,
-    paddingHorizontal: 15,
+    backgroundColor: inputBg,
+    borderRadius: 14,
+    paddingHorizontal: 16,
     color: ink,
-    fontSize: 15,
+    fontSize: 14,
   },
-  primaryButton: {
+  passwordWrap: {
     height: 52,
-    backgroundColor: ink,
-    borderRadius: 3,
+    backgroundColor: inputBg,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  passwordInput: {
+    flex: 1,
+    color: ink,
+    fontSize: 14,
+  },
+  optionsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 4,
+  },
+  rememberRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  checkbox: {
+    width: 18,
+    height: 18,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: "#C6C6CC",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 18,
+  },
+  checkboxChecked: {
+    backgroundColor: "rgba(255, 132, 0, 1)",
+    borderColor: "rgba(76, 76, 75, 0.7)",
+  },
+  rememberText: {
+    fontSize: 13,
+    color: ink,
+  },
+  forgotText: {
+    fontSize: 13,
+    color: "rgba(255, 132, 0, 1)",
+    fontWeight: "600",
+  },
+  primaryButton: {
+    height: 54,
+    backgroundColor: "#f7c8a5ff",
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 8,
   },
   primaryText: {
-    color: "#F4F4ED",
+    color: "#000000ff",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  dividerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 8,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: "#E0E0E5",
+  },
+  dividerText: {
     fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 2.2,
+    color: muted,
+  },
+  socialRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 16,
+    marginTop: 4,
+  },
+  socialButton: {
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    backgroundColor: "#FFFFFF",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "rgba(0,0,0,0.08)",
+    shadowOpacity: 1,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
   },
   footerRow: {
     flexDirection: "row",
-    gap: 5,
     justifyContent: "center",
-    marginTop: 28,
+    marginTop: 24,
   },
-  footerText: { color: muted, fontSize: 14 },
-  link: { color: ink, fontSize: 14, fontWeight: "800" },
+  footerText: { color: muted, fontSize: 13 },
+  link: { color: "rgba(255, 132, 0, 1)", fontSize: 13, fontWeight: "700" },
 });

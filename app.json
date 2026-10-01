@@ -7,11 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "eshop",
     "userInterfaceStyle": "automatic",
-    "splash": {
-      "image": "./assets/images/s1.png",
-      "resizeMode": "cover",
-      "backgroundColor": "#17211D"
-    },
     "ios": {
       "icon": "./assets/expo.icon"
     },
@@ -24,7 +19,29 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.meenaxi4499.eshop"
+      "package": "com.meenaxi4499.eshop",
+      "googleServicesFile": "./google-services.json",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "https://estorebackend.amptechnology.in",
+              "pathPrefix": "/store"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ]
     },
     "web": {
       "output": "static",
@@ -41,11 +58,29 @@
           "resizeMode": "cover"
         }
       ],
-      "expo-video"
+      "expo-video",
+      "expo-image",
+      "expo-web-browser",
+      "@react-native-firebase/app",
+      "@react-native-firebase/messaging",
+      ["expo-build-properties", { "android": {} }],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow ESHOP to use the microphone for voice search.",
+          "speechRecognitionPermission": "Allow ESHOP to use speech recognition for voice search."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "482d138f-5e95-4567-bc0b-c8e79faa0a75"
+      }
     }
   }
 }

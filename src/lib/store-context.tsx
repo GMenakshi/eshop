@@ -1,46 +1,24 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as Linking from "expo-linking";
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useState,
   type ReactNode,
 } from "react";
 
-import { api, DEFAULT_STORE_ID } from "@/lib/api";
+import { api } from "@/lib/api";
 
-const LEGACY_STORE_IDS = new Set(["STR-1781626861400"]);
-
-export const resolveStoreIdFromUrl = (url?: string | null) => {
-  if (!url) return null;
-
-  try {
-    const parsed = Linking.parse(url);
-    const queryId =
-      typeof parsed.queryParams?.storeId === "string"
-        ? parsed.queryParams.storeId
-        : typeof parsed.queryParams?.id === "string"
-          ? parsed.queryParams.id
-          : undefined;
-
-    const pathSegments = parsed.path?.split("/").filter(Boolean) ?? [];
-    const storeIndex = pathSegments.findIndex((segment) => segment === "store");
-    const pathStoreId =
-      storeIndex >= 0 ? pathSegments[storeIndex + 1] : undefined;
-    const schemeStoreId =
-      parsed.hostname === "store" ? pathSegments[0] : undefined;
-
-    // Only accept explicit store links. This prevents an Expo LAN host such
-    // as 192.168.1.20 from being treated as a store ID during startup.
-    const candidate = queryId ?? pathStoreId ?? schemeStoreId;
-
-    const cleaned = String(candidate ?? "").trim();
-    return cleaned && cleaned !== "store" ? cleaned : null;
-  } catch {
-    return null;
-  }
+export type SavedStore = {
+  id: string;
+  mongoId?: string;
+  name?: string;
+  phone?: string;
 };
+
+const STORES_KEY = "savedStores";
+const ACTIVE_KEY = "activeStoreId";
 
 export const buildStoreDeepLink = (storeId: string) => {
   const scheme = process.env.EXPO_PUBLIC_DEEP_LINK_SCHEME ?? "eshop";
@@ -48,103 +26,99 @@ export const buildStoreDeepLink = (storeId: string) => {
 };
 
 type StoreContextValue = {
+  stores: SavedStore[];
   storeId: string | null;
+  activeStore: SavedStore | null;
   ready: boolean;
-  hasStoreError: boolean;
+  joinStore: (id: string) => Promise<boolean>;
   setStoreId: (id: string) => Promise<boolean>;
+  switchStore: (id: string) => Promise<void>;
+  removeStore: (id: string) => Promise<void>;
 };
 
-const StoreContext = createContext<StoreContextValue>({
-  storeId: null,
-  ready: false,
-  hasStoreError: false,
-  setStoreId: async () => false,
-});
+const StoreContext = createContext<StoreContextValue>(null as any);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [storeId, setId] = useState<string | null>(null);
+  const [stores, setStores] = useState<SavedStore[]>([]);
+  const [storeId, setActiveId] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
-  const [hasStoreError, setHasStoreError] = useState(false);
-
-  const applyStoreId = async (id: string) => {
-    const trimmed = id?.trim();
-    if (!trimmed) {
-      await AsyncStorage.removeItem("activeStoreId");
-      setId(null);
-      setHasStoreError(true);
-      return false;
-    }
-
-    const exists = await api.storeExists(trimmed);
-    if (!exists) {
-      await AsyncStorage.removeItem("activeStoreId");
-      setId(null);
-      setHasStoreError(true);
-      return false;
-    }
-
-    await AsyncStorage.setItem("activeStoreId", trimmed);
-    setId(trimmed);
-    setHasStoreError(false);
-    return true;
-  };
 
   useEffect(() => {
-    const hydrate = async () => {
+    (async () => {
       try {
-        const saved = await AsyncStorage.getItem("activeStoreId");
-        if (saved && !LEGACY_STORE_IDS.has(saved)) {
-          const applied = await applyStoreId(saved);
-          if (!applied && DEFAULT_STORE_ID?.trim()) {
-            await applyStoreId(DEFAULT_STORE_ID.trim());
-          }
-        } else {
-          await AsyncStorage.removeItem("activeStoreId");
-          const fallback = DEFAULT_STORE_ID?.trim();
-          if (fallback) {
-            await applyStoreId(fallback);
-          } else {
-            setId(null);
-            setHasStoreError(false);
-          }
-        }
+        const [rawList, savedActive] = await Promise.all([
+          AsyncStorage.getItem(STORES_KEY),
+          AsyncStorage.getItem(ACTIVE_KEY),
+        ]);
+        const list: SavedStore[] = rawList ? JSON.parse(rawList) : [];
+        setStores(list);
+        setActiveId(
+          savedActive && list.some((s) => s.id === savedActive)
+            ? savedActive
+            : (list[0]?.id ?? null),
+        );
       } catch {
-        // Backend unavailable; fall back gracefully
-        const fallback = DEFAULT_STORE_ID?.trim();
-        if (fallback) {
-          setId(fallback);
-          setHasStoreError(false);
-        } else {
-          setId(null);
-          setHasStoreError(false);
-        }
+        setStores([]);
+        setActiveId(null);
       } finally {
         setReady(true);
       }
-    };
-
-    const handleDeepLink = async (url?: string | null) => {
-      const resolvedId = resolveStoreIdFromUrl(url);
-      if (!resolvedId) return;
-      await applyStoreId(resolvedId);
-    };
-
-    void hydrate();
-    void Linking.getInitialURL().then(handleDeepLink);
-    const subscription = Linking.addEventListener("url", (event) => {
-      void handleDeepLink(event.url);
-    });
-
-    return () => {
-      subscription.remove();
-    };
+    })();
   }, []);
 
-  const setStoreId = async (id: string) => applyStoreId(id);
+  const persist = async (list: SavedStore[], active: string | null) => {
+    setStores(list);
+    setActiveId(active);
+    await AsyncStorage.setItem(STORES_KEY, JSON.stringify(list));
+    if (active) await AsyncStorage.setItem(ACTIVE_KEY, active);
+    else await AsyncStorage.removeItem(ACTIVE_KEY);
+  };
+
+  const joinStore = useCallback(
+    async (id: string) => {
+      const info = await api.storeInfo(id);
+      if (!info) return false;
+      const entry: SavedStore = {
+        id: info.id,
+        mongoId: info.mongoId,
+        name: info.name,
+        phone: info.phone,
+      };
+      await persist([...stores.filter((s) => s.id !== entry.id), entry], entry.id);
+      return true;
+    },
+    [stores],
+  );
+
+  const switchStore = useCallback(
+    async (id: string) => {
+      if (stores.some((s) => s.id === id)) await persist(stores, id);
+    },
+    [stores],
+  );
+
+  const removeStore = useCallback(
+    async (id: string) => {
+      const list = stores.filter((s) => s.id !== id);
+      await persist(list, storeId === id ? (list[0]?.id ?? null) : storeId);
+    },
+    [stores, storeId],
+  );
+
+  const activeStore = stores.find((s) => s.id === storeId) ?? null;
 
   return (
     <StoreContext.Provider
-      value={{ storeId, ready, hasStoreError, setStoreId }}
+      value={{
+        stores,
+        storeId,
+        activeStore,
+        ready,
+        joinStore,
+        setStoreId: joinStore,
+        switchStore,
+        removeStore,
+      }}
     >
       {children}
     </StoreContext.Provider>

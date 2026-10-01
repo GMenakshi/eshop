@@ -1,42 +1,64 @@
-import { Redirect, useLocalSearchParams } from "expo-router";
-import { useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { Redirect, router, useLocalSearchParams } from "expo-router";
+import { useCallback, useEffect, useState } from "react";
+import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
 
 import { ThemedText } from "@/components/themed-text";
 import { useStore } from "@/lib/store-context";
 
-function NoStoreAvailable() {
-  return (
-    <View style={styles.container}>
-      <ThemedText style={styles.title}>NO STORE AVAILABLE</ThemedText>
-    </View>
-  );
-}
-
 export default function StoreEntryRoute() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { setStoreId, ready, storeId, hasStoreError } = useStore();
-  const [checked, setChecked] = useState(false);
+  const { joinStore, ready, stores } = useStore();
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (!id || !ready) return;
-
+    if (!ready || !id) return;
     let active = true;
-    void setStoreId(id).then((success) => {
-      if (active) setChecked(true);
-      if (active && success) setChecked(true);
-    });
+    setFailed(false);
+
+    joinStore(id)
+      .then((ok) => {
+        if (!active) return;
+        if (ok) router.replace("/(tabs)");
+        else setFailed(true);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
 
     return () => {
       active = false;
     };
-  }, [id, ready, setStoreId]);
+    // joinStore intentionally omitted: it is not memoized and would re-trigger the effect
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, id, attempt]);
 
-  if (!ready) return null;
-  if (hasStoreError || (checked && !storeId)) return <NoStoreAvailable />;
-  if (storeId === id) return <Redirect href="/(tabs)" />;
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
-  return <Redirect href="/(tabs)" />;
+  if (!id) return <Redirect href="/(tabs)" />;
+
+  if (failed) {
+    return (
+      <View style={styles.container}>
+        <ThemedText style={styles.title}>NO STORE AVAILABLE</ThemedText>
+        <Pressable onPress={retry}>
+          <ThemedText style={styles.link}>Try again</ThemedText>
+        </Pressable>
+        <Pressable onPress={() => router.replace("/(tabs)")}>
+          <ThemedText style={styles.link}>
+            {stores.length > 0 ? "Back to my stores" : "Go home"}
+          </ThemedText>
+        </Pressable>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      <ActivityIndicator />
+      <ThemedText style={styles.hint}>Opening store…</ThemedText>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -46,6 +68,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     padding: 24,
+    gap: 16,
   },
   title: {
     color: "#17211D",
@@ -54,4 +77,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     textAlign: "center",
   },
+  link: { color: "#E8875C", fontWeight: "700" },
+  hint: { color: "#17211D", opacity: 0.6 },
 });

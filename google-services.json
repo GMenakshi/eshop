@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "533323927383",
+    "project_id": "amp-product-management",
+    "storage_bucket": "amp-product-management.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:533323927383:android:06a0d9f69231fadbe87812",
+        "android_client_info": {
+          "package_name": "com.meenaxi4499.eshop"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBVbYqeGAYGUxmywW6oplvOELRmGL5zi1c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

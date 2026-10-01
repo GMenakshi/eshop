@@ -51,10 +51,7 @@ export function TabButton({
 }: TabTriggerSlotProps) {
   return (
     <Pressable {...props} style={({ pressed }) => pressed && styles.pressed}>
-      <ThemedView
-        type={isFocused ? "backgroundSelected" : "backgroundElement"}
-        style={styles.tabButtonView}
-      >
+      
         <View style={styles.tabContent}>
           <SymbolView
             name={
@@ -77,14 +74,9 @@ export function TabButton({
             size={18}
             tintColor={isFocused ? "#17211D" : "#60646C"}
           />
-          <ThemedText
-            type="small"
-            themeColor={isFocused ? "text" : "textSecondary"}
-          >
-            {children}
-          </ThemedText>
+          
         </View>
-      </ThemedView>
+      
     </Pressable>
   );
 }
@@ -92,13 +84,11 @@ export function TabButton({
 export function CustomTabList(props: TabListProps) {
   return (
     <View {...props} style={styles.tabListContainer}>
-      <ThemedView type="backgroundElement" style={styles.innerContainer}>
         <ThemedText type="smallBold" style={styles.brandText}>
           ESHOP
         </ThemedText>
 
         {props.children}
-      </ThemedView>
     </View>
   );
 }

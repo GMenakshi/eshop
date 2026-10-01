@@ -1,19 +1,25 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
-import { Colors } from "@/constants/theme";
 import { useAuth } from "@/context/auth-context";
 import { useCart } from "@/context/cart-context";
-import { api, apiImageUrl } from "@/lib/api";
+import { useWishlist } from "@/context/wishlist-context";
+import { api, API_BASE_URL, apiImageUrl } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
+import { useVoiceSearch } from "@/lib/use-voice-search";
+import { Ionicons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { BlurView } from "expo-blur";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
+import { fetchNotifications } from "@/lib/notifications-api";
 import { SymbolView } from "expo-symbols";
-import { VideoView, useVideoPlayer } from "expo-video";
-import { useEffect, useState } from "react";
+import { useVideoPlayer } from "expo-video";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   Animated,
+  Dimensions,
   Modal,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -24,12 +30,18 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useWishlist } from "@/context/wishlist-context";
-import { SafeAreaProvider } from "react-native-safe-area-context";
-import { BlurView } from "expo-blur";
+import {
+  SafeAreaProvider,
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 
 const imageBase = "https://api-palette-project.lovable.app/assets/";
+export type HomeProductColor = {
+  color: string;
+  image: string;
+};
+
 export type HomeProduct = {
   id: string;
   name: string;
@@ -44,8 +56,9 @@ export type HomeProduct = {
   deliveryTime?: string;
   productCode?: string;
   badge?: string;
+  colors?: HomeProductColor[];
+  variants?: any[];
 };
-
 const offerSlides = [
   {
     eyebrow: "FIELD SALE / 01",
@@ -137,24 +150,175 @@ const saveRecentSearches = async (searches: string[]): Promise<void> => {
   }
 };
 
+// Category display data with emojis for the new UI
+const categoryDisplayData = [
+  { name: "Dresses", emoji: "👗" },
+  { name: "Blazers", emoji: "🧥" },
+  { name: "Knitwear", emoji: "🧤" },
+  { name: "Outerwear", emoji: "🧤" },
+  { name: "Trousers", emoji: "👖" },
+];
+
+// Gender filter tabs
+// Gender filter tabs
+const genderTabs = ["Man", "Women", "Kid"];
+
+// Banner colours: used when the API banner has no `color` field
+const bannerPresets = ["#E8875C", "#245C55", "#7A4FD6", "#C2456B", "#2F6FDE"];
+const FOR_YOU = "for-you";
+const isHex = (v: unknown): v is string =>
+  typeof v === "string" && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v.trim());
+
+const hexToRgb = (hex: string) => {
+  const h = hex.trim().replace("#", "");
+  const full =
+    h.length === 3
+      ? h
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : h;
+  const n = parseInt(full, 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+};
+
+// amount > 0 lightens, amount < 0 darkens
+const shade = (hex: string, amount: number) => {
+  const { r, g, b } = hexToRgb(hex);
+  const t = amount >= 0 ? 255 : 0;
+  const p = Math.abs(amount);
+  const mix = (c: number) => Math.round(c + (t - c) * p);
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+};
+
+const rgba = (hex: string, alpha: number) => {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
+type Palette = {
+  hero: readonly [string, string, string];
+  top: readonly [string, string, string];
+};
+
+const buildPalette = (hex: string): Palette => ({
+  hero: [shade(hex, 0.35), hex, shade(hex, -0.2)],
+  top: [rgba(hex, 0.55), rgba(hex, 0.3), rgba(hex, 0)],
+});
+
+const mapBanner = (b: any, idx: number) => {
+  const rawCat = b.categoryId;
+  const rawProd = b.productId;
+  return {
+    id: String(b._id),
+    name: b.name as string,
+    image: apiImageUrl(b.image) ?? "",
+    color: isHex(b.color)
+      ? (b.color as string)
+      : bannerPresets[idx % bannerPresets.length],
+    categoryId: rawCat
+      ? String(typeof rawCat === "object" ? rawCat._id : rawCat)
+      : null,
+    productId: rawProd
+      ? String(typeof rawProd === "object" ? rawProd._id : rawProd)
+      : null,
+  };
+};
+
+const formatAddress = (a: any): string => {
+  if (!a) return "";
+  if (typeof a === "string") return a.trim();
+  if (typeof a !== "object") return "";
+  return [a.addressLine, a.area, a.city, a.state, a.pincode]
+    .filter(Boolean)
+    .join(", ");
+};
+
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good Morning";
+  if (hour < 17) return "Good Afternoon";
+  return "Good Evening";
+}
+
+function SlidingProductImage({
+  images,
+  activeIndex,
+  style,
+}: {
+  images: string[];
+  activeIndex: number;
+  style: any;
+}) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const [displayedIndex, setDisplayedIndex] = useState(activeIndex);
+
+  useEffect(() => {
+    if (activeIndex === displayedIndex) return;
+    translateX.setValue(Dimensions.get("window").width);
+    setDisplayedIndex(activeIndex);
+    Animated.timing(translateX, {
+      toValue: 0,
+      duration: 260,
+      useNativeDriver: true,
+    }).start();
+  }, [activeIndex]);
+
+  return (
+    <Animated.View
+      style={{ width: "100%", height: "100%", transform: [{ translateX }] }}
+    >
+      <Image
+        source={{ uri: images[displayedIndex] }}
+        style={style}
+        contentFit="cover"
+      />
+    </Animated.View>
+  );
+}
 
 export default function HomeScreen() {
-  
+  console.log("HOME SCREEN LOADED v2");
+  const insets = useSafeAreaInsets();
   const { token } = useAuth();
   const { addItem, items: cartItems, changeQuantity } = useCart();
   const { toggle: toggleWishlist, isSaved: isWishlisted } = useWishlist();
-  const { storeId } = useStore();
-  const [activeCategory, setActiveCategory] = useState("All");
-  const [categories, setCategories] = useState<{ id: string; name: string; image?: string; icon?: string }[]>(
-    [],
-  );
-  const [banners, setBanners] = useState<{ id: string; name: string; image: string }[]>([]);
+  const { storeId, activeStore } = useStore();
+  const [activeCategory, setActiveCategory] = useState(FOR_YOU);
+  const [categories, setCategories] = useState<
+    { id: string; name: string; image?: string; icon?: string }[]
+  >([]);
+  const [banners, setBanners] = useState<
+    {
+      id: string;
+      name: string;
+      image: string;
+      color: string;
+      categoryId: string | null;
+      productId: string | null;
+    }[]
+  >([]);
+  const [activeBannerIndex, setActiveBannerIndex] = useState(0);
+  const [categoryBanners, setCategoryBanners] = useState<
+    ReturnType<typeof mapBanner>[]
+  >([]);
+  const bgAnim = useRef(new Animated.Value(0)).current;
+  const prevBannerIndexRef = useRef(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const [products, setProducts] = useState<HomeProduct[]>([]);
+  const [storeName, setStoreName] = useState("");
+  const [storeAddress, setStoreAddress] = useState("");
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [catLayout, setCatLayout] = useState({ y: 0, h: 0 });
+  const [chipsActive, setChipsActive] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [searchSuggestionIndex, setSearchSuggestionIndex] = useState(0);
+  const [activeGenderTab, setActiveGenderTab] = useState("Women");
+  const [selectedColorIndex, setSelectedColorIndex] = useState<
+    Record<string, number>
+  >({});
   const brandAssets = [
     require("@/assets/images/brand6.jpg"),
     require("@/assets/images/brand4.jpg"),
@@ -174,22 +338,26 @@ export default function HomeScreen() {
   const brandColumns: Array<
     Array<{ image: number; title: string; height: number; offset?: number }>
   > = [
-      [
-        { image: brandAssets[0], title: brandTitles[0], height: 230 },
-        { image: brandAssets[2], title: brandTitles[2], height: 180 },
-        { image: brandAssets[4], title: brandTitles[4], height: 210 },
-      ],
-      [
-        { image: brandAssets[1], title: brandTitles[1], height: 180, offset: 26 },
-        { image: brandAssets[3], title: brandTitles[3], height: 250, offset: 12 },
-        { image: brandAssets[5], title: brandTitles[5], height: 190, offset: 12 },
-      ],
-    ];
+    [
+      { image: brandAssets[0], title: brandTitles[0], height: 230 },
+      { image: brandAssets[2], title: brandTitles[2], height: 180 },
+      { image: brandAssets[4], title: brandTitles[4], height: 210 },
+    ],
+    [
+      { image: brandAssets[1], title: brandTitles[1], height: 180, offset: 26 },
+      { image: brandAssets[3], title: brandTitles[3], height: 250, offset: 12 },
+      { image: brandAssets[5], title: brandTitles[5], height: 190, offset: 12 },
+    ],
+  ];
 
   const [offerIndex, setOfferIndex] = useState(0);
   const [offerOpacity] = useState(() => new Animated.Value(1));
   const [couponOpen, setCouponOpen] = useState(false);
   const [stickyHeaderOpacity, setStickyHeaderOpacity] = useState(0);
+  const [headerH, setHeaderH] = useState(90);
+  const [adUrl, setAdUrl] = useState<string | null>(null);
+  const [adReady, setAdReady] = useState(false);
+  const scrollY = useRef(new Animated.Value(0)).current;
   const activeOffer = offerSlides[offerIndex];
   const bannerPlayer = useVideoPlayer(
     require("@/assets/images/video2.mp4"),
@@ -227,6 +395,41 @@ export default function HomeScreen() {
     }, 2000);
     return () => clearInterval(timer);
   }, []);
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/ads/public`);
+        const json = await res.json();
+        const url = json?.ads?.[0]?.mediaUrl;
+        if (active && typeof url === "string" && url) setAdUrl(url);
+      } catch (error) {
+        console.warn("Failed to load header ad", error);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+    useFocusEffect(
+    useCallback(() => {
+      if (!token) {
+        setUnreadCount(0);
+        return;
+      }
+      let active = true;
+      fetchNotifications(token, 1)
+        .then((d) => {
+          if (active) setUnreadCount(d.unreadCount ?? 0);
+        })
+        .catch(() => undefined);
+      return () => {
+        active = false;
+      };
+    }, [token]),
+  );
+
   const loadHomeData = async () => {
     if (!storeId) {
       setProducts([]);
@@ -234,61 +437,66 @@ export default function HomeScreen() {
     }
     setRefreshing(true);
     try {
-      const [productResult, categoryResult, bannerResult] = await Promise.allSettled([
-  api.products(storeId),
-  api.categories(),
-  api.banners(),
-]);
+      const [productResult, categoryResult, bannerResult] =
+        await Promise.allSettled([
+          api.products(storeId),
+          api.categories(storeId),
+          api.banners(),
+        ]);
 
       const productResponse =
         productResult.status === "fulfilled" ? productResult.value : null;
       const categoryResponse =
         categoryResult.status === "fulfilled" ? categoryResult.value : null;
-        const bannerResponse =
-  bannerResult.status === "fulfilled" ? bannerResult.value : null;
-console.log("[Banner] raw response", JSON.stringify(bannerResponse));
-      if (productResponse) {
-        const pageSize = Math.max(productResponse.products.length, 1);
-        const totalPages = Math.ceil(
-          (productResponse.pagination?.totalData ?? pageSize) / pageSize,
-        );
-        const additionalPages = await Promise.all(
-          Array.from({ length: Math.max(totalPages - 1, 0) }, (_, index) =>
-            api.products(storeId, index + 2),
+      const bannerResponse =
+        bannerResult.status === "fulfilled" ? bannerResult.value : null;
+      console.log("[Banner] raw response", JSON.stringify(bannerResponse));
+      try {
+        const productsUrl = `${API_BASE_URL}/product/store/${encodeURIComponent(storeId)}/products`;
+        const newApiRes = await fetch(productsUrl);
+        const newApiJson = await newApiRes.json();
+
+        const apiStore = newApiJson.store;
+        console.log("[Store] from products API", JSON.stringify(apiStore));
+        const fetchedName =
+          apiStore?.storeName ?? apiStore?.name ?? apiStore?.title;
+        if (fetchedName) setStoreName(String(fetchedName));
+        setStoreAddress(
+          formatAddress(
+            apiStore?.address ??
+              apiStore?.storeAddress ??
+              apiStore?.location ??
+              apiStore,
           ),
-        );
-        const allProducts = [productResponse, ...additionalPages].flatMap(
-          (response) => response.products,
-        );
-        const detailedProducts = await Promise.all(
-          allProducts.map(async (product) => {
-            try {
-              const response = await api.product(storeId, product._id);
-              return response.product ?? product;
-            } catch {
-              return product;
-            }
-          }),
         );
 
         setProducts(
-          detailedProducts.map((product) => ({
-            id: product._id,
-            name: product.title,
-            price: product.price,
-            brand: product.brandId ?? "ESHOP",
-            category:
-              product.categoryName ?? product.categoryId ?? "Collection",
-            image:
-              apiImageUrl(product.image) ?? `${imageBase}p-pack-EQw1NN7b.jpg`,
-            description: product.description ?? "",
-            unit: product.unit,
-            size: product.size,
-            weight: product.weight,
-            deliveryTime: product.deliveryTime,
-            productCode: product.productCode,
-          })),
+          (newApiJson.products ?? []).map((product: any) => {
+            const variants = product.variants ?? [];
+            const colors: HomeProductColor[] = variants
+              .filter((v: any) => v.color && v.images?.length)
+              .map((v: any) => ({ color: v.color, image: v.images[0] }));
+
+            return {
+              id: product._id,
+              name: product.name,
+              price: product.minOfferPrice ?? 0,
+              brand: "ESHOP",
+              category: product.category?.name ?? "Collection",
+              image:
+                product.images?.[0] ??
+                colors[0]?.image ??
+                `${imageBase}p-pack-EQw1NN7b.jpg`,
+              description: product.description ?? "",
+              deliveryTime: product.deliveryTime,
+              productCode: product.productCode,
+              colors,
+              variants: product.variants ?? [],
+            };
+          }),
         );
+      } catch (error) {
+        console.warn("Failed to load products from new API", error);
       }
 
       if (categoryResponse) {
@@ -303,16 +511,19 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
       }
 
       if (bannerResponse) {
-  setBanners(
-    bannerResponse.banners
-      .filter((b) => b.isActive)
-      .map((b) => ({
-        id: b._id,
-        name: b.name,
-        image: apiImageUrl(b.image) ?? "",
-      })),
-  );
-}
+        const filtered = bannerResponse.banners
+          .filter((b) => b.isActive)
+          .filter((b) => {
+            const raw = (b as any).storeId ?? (b as any).store;
+            const bannerStoreId = typeof raw === "object" ? raw?._id : raw;
+            return (
+              !activeStore?.mongoId ||
+              !bannerStoreId ||
+              bannerStoreId === activeStore.mongoId
+            );
+          });
+        setBanners(filtered.map(mapBanner));
+      }
 
       if (productResult.status === "rejected") {
         console.warn("Failed to load products from API", productResult.reason);
@@ -331,28 +542,69 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
   };
 
   useEffect(() => {
+    setProducts([]);
+    setCategories([]);
+    setBanners([]);
+    setStoreName("");
+    setStoreAddress("");
+    setActiveCategory(FOR_YOU);
+    setSelectedColorIndex({});
     if (!storeId) return;
     void loadHomeData();
   }, [storeId]);
+
+  useEffect(() => {
+    setCategoryBanners([]);
+    if (activeCategory === FOR_YOU) return;
+
+    let active = true;
+    (async () => {
+      try {
+        const qs = activeStore?.mongoId
+          ? `?storeId=${encodeURIComponent(activeStore.mongoId)}`
+          : "";
+        const res = await fetch(
+          `${API_BASE_URL}/banner/public/by-category/${encodeURIComponent(activeCategory)}${qs}`,
+        );
+        const json = await res.json();
+        if (active && Array.isArray(json?.banners)) {
+          setCategoryBanners(
+            json.banners
+              .filter((b: any) => b.isActive !== false)
+              .map(mapBanner),
+          );
+        }
+      } catch (error) {
+        console.warn("Failed to load category banners", error);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [activeCategory, activeStore?.mongoId]);
+
+  const isForYou = activeCategory === FOR_YOU;
   const activeCategoryObj = categories.find((cat) => cat.id === activeCategory);
   const activeCategoryName = activeCategoryObj?.name ?? "";
   const filteredProducts = products.filter((product) => {
     const name = product?.name ?? "";
-    const matchesCategory =
-      activeCategory === "All" ||
-      product.category === activeCategoryName;
+    const matchesCategory = isForYou || product.category === activeCategoryName;
     return (
       matchesCategory && name.toLowerCase().includes(query.trim().toLowerCase())
     );
   });
+  const visibleBanners = isForYou
+    ? banners.filter((b) => !b.categoryId)
+    : categoryBanners;
   const inspirationProducts = products.slice(0, 2); // Show only 2 products for SHOP NOW
-  const stickyHeaderIndex = 1;
-  const stickyBackgroundOpacity = Math.min(stickyHeaderOpacity, 1);
-  const categoryIconOpacity = Math.max(0, 1 - stickyHeaderOpacity * 1.3);
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const y = event.nativeEvent.contentOffset.y ?? 0;
     setStickyHeaderOpacity(Math.min(y / 120, 1));
+    scrollY.setValue(y);
+    setChipsActive(
+      catLayout.h > 0 && y >= catLayout.y + catLayout.h - (insets.top + 78),
+    );
   };
 
   const openSearch = async () => {
@@ -376,11 +628,17 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
     await saveRecentSearches(nextRecentSearches);
     setQuery(normalizedValue);
     setSearchOpen(false);
+    router.push({ pathname: "/search", params: { query: normalizedValue } });
   };
+  const voice = useVoiceSearch((text, isFinal) => {
+    setQuery(text);
+    if (isFinal) void submitSearch(text);
+  }, searchOpen);
 
   const selectRecentSearch = (value: string) => {
     setQuery(value);
     setSearchOpen(false);
+    router.push({ pathname: "/search", params: { query: value } });
   };
 
   const clearRecentSearches = async () => {
@@ -407,11 +665,18 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
           weight: product.weight,
           deliveryTime: product.deliveryTime,
           productCode: product.productCode,
+          variants: product.variants,
         },
         1,
       );
     } catch (error) {
       console.warn(error);
+      Alert.alert(
+        "Product Unavailable",
+        error instanceof Error
+          ? error.message
+          : "This product is not available right now.",
+      );
     }
   };
 
@@ -427,31 +692,103 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
     }
   };
 
+  // Get the first product for hero banner display
+  const heroProduct = products.length > 0 ? products[0] : null;
+
+  // --- Dynamic background gradient based on active banner ---
+  const handleBannerScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const cardWidth = Dimensions.get("window").width - 48 + 12; // card + gap
+      const idx = Math.round(event.nativeEvent.contentOffset.x / cardWidth);
+      const clamped = Math.max(0, Math.min(idx, visibleBanners.length - 1));
+      if (clamped !== prevBannerIndexRef.current) {
+        prevBannerIndexRef.current = clamped;
+        setActiveBannerIndex(clamped);
+      }
+    },
+    [visibleBanners.length],
+  );
+
+  const selectCategory = (id: string) => {
+    setActiveCategory(id);
+    setActiveBannerIndex(0);
+    prevBannerIndexRef.current = 0;
+  };
+
+  const activeBannerColor =
+    visibleBanners.length > 0
+      ? (visibleBanners[activeBannerIndex]?.color ?? bannerPresets[0])
+      : "#E8875C";
+
+  const topGradientColors = useMemo(
+    () => [
+      rgba(activeBannerColor, 0.55),
+      rgba(activeBannerColor, 0.25),
+      rgba(activeBannerColor, 0),
+    ],
+    [activeBannerColor],
+  );
+
+  const renderSearchPill = () => (
+    <Pressable
+      style={[
+        s.searchBar,
+        { marginTop: 0, marginBottom: 0, marginHorizontal: 0 },
+      ]}
+      onPress={() => void openSearch()}
+      accessibilityLabel="Open search"
+    >
+      <SymbolView
+        name={{ ios: "magnifyingglass", android: "search", web: "search" }}
+        size={20}
+        tintColor="#999"
+      />
+      <TextInput
+        value={query}
+        editable={false}
+        pointerEvents="none"
+        placeholder={`Search styles, brands..`}
+        placeholderTextColor="#AAAAAA"
+        style={s.searchInput}
+      />
+      <View style={s.searchOrangeBtn}>
+        <SymbolView
+          name={{ ios: "slider.horizontal.3", android: "tune", web: "tune" }}
+          size={16}
+          tintColor="#FFFFFF"
+        />
+      </View>
+    </Pressable>
+  );
+
+  const pinTop = insets.top + 12; // where the bar stops at the top
+  const restTop = headerH + 12; // where it sits under the greeting
+  const travel = Math.max(restTop - pinTop, 60);
+  const pillTop = scrollY.interpolate({
+    inputRange: [0, travel],
+    outputRange: [restTop, pinTop],
+    extrapolate: "clamp",
+  });
+  const blurOpacity = scrollY.interpolate({
+    inputRange: [travel - 40, travel],
+    outputRange: [0, 1],
+    extrapolate: "clamp",
+  });
+
+  const catBarTop = insets.top + 12 + 54 + 6;
+  const revealEnd = Math.max(
+    catLayout.y + catLayout.h - (insets.top + 78),
+    31,
+  );
+  const catBarOpacity = scrollY.interpolate({
+    inputRange: [revealEnd - 30, revealEnd],
+    outputRange: [0, 1],
+    extrapolate: "clamp",
+  });
+
   return (
-    <ThemedView style={styles.screen}>
-      <SafeAreaView style={styles.safeArea}>
-        <Animated.View
-          pointerEvents="none"
-          style={[
-            styles.topGradient,
-            {
-              opacity: Math.max(0, 0.7 - stickyHeaderOpacity * 0.7),
-            },
-          ]}
-        >
-          <LinearGradient
-            colors={[
-              "rgba(185, 42, 32, 0.62)",
-              "rgba(220, 92, 55, 0.6)",
-              "rgba(244, 149, 72, 0.38)",
-              "rgba(255, 255, 255, 0)",
-            ]}
-            locations={[0, 0.34, 0.7, 1]}
-            start={{ x: 0.5, y: 0 }}
-            end={{ x: 0.5, y: 1 }}
-            style={StyleSheet.absoluteFill}
-          />
-        </Animated.View>
+    <ThemedView style={s.screen}>
+      <View style={s.safeArea}>
         <ScrollView
           onScroll={handleScroll}
           scrollEventThrottle={16}
@@ -459,222 +796,283 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
-          stickyHeaderIndices={[stickyHeaderIndex]}
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[
+            s.scrollContent,
+            { paddingBottom: insets.bottom + 120 },
+          ]}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
               onRefresh={() => void loadHomeData()}
-              tintColor="#17211D"
-              colors={["#17211D"]}
+              tintColor="#E87B4F"
+              colors={["#E87B4F"]}
               title="Refreshing..."
-              titleColor="#17211D"
+              titleColor="#333"
             />
           }
         >
-          <View style={styles.header}>
-            <View style={styles.headerInner}>
-              <View style={styles.headerMeta}>
-                <ThemedText style={styles.logo}>ESHOP</ThemedText>
-                <ThemedText style={styles.kicker}>FIELD SUPPLY / 04</ThemedText>
-                <Pressable
-                  style={styles.addressRow}
-                  onPress={() => router.push("/address")}
-                  accessibilityLabel="Choose delivery address"
-                >
-                  <SymbolView
-                    name={{
-                      ios: "location.fill",
-                      android: "location_on",
-                      web: "location_on",
+          {/* ─── Top Gradient Background ─── */}
+          {/* ─── Top Background: ad media, gradient as fallback ─── */}
+          <View style={s.topGradientWrap} pointerEvents="none">
+            {adUrl && (
+              <>
+                <Image
+                  source={{ uri: adUrl }}
+                  style={[
+                    StyleSheet.absoluteFill,
+                    { opacity: adReady ? 1 : 0 },
+                  ]}
+                  contentFit="cover"
+                  onLoad={() => setAdReady(true)}
+                  onError={() => {
+                    setAdUrl(null);
+                    setAdReady(false);
+                  }}
+                />
+                {adReady && (
+                  <LinearGradient
+                    colors={["rgba(250,250,250,0)", "#FAFAFA"]}
+                    style={{
+                      position: "absolute",
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      height: 160,
                     }}
-                    size={12}
-                    tintColor="#6E786F"
                   />
-                  <ThemedText style={styles.addressText}>
-                    Deliver to: Brooklyn, NY
-                  </ThemedText>
-                  <SymbolView
-                    name={{
-                      ios: "chevron.down",
-                      android: "expand_more",
-                      web: "expand_more",
-                    }}
-                    size={11}
-                    tintColor="#6E786F"
+                )}
+              </>
+            )}
+
+            {!(adUrl && adReady) && (
+              <>
+                {visibleBanners.map((banner, i) => (
+                  <LinearGradient
+                    key={banner.id}
+                    colors={[
+                      rgba(banner.color, 0.55),
+                      rgba(banner.color, 0.25),
+                      rgba(banner.color, 0),
+                    ]}
+                    locations={[0, 0.5, 1]}
+                    start={{ x: 0.5, y: 0 }}
+                    end={{ x: 0.5, y: 1 }}
+                    style={[
+                      StyleSheet.absoluteFill,
+                      { opacity: i === activeBannerIndex ? 1 : 0 },
+                    ]}
                   />
-                </Pressable>
-              </View>
-              <View style={styles.headerActions}>
-                <Pressable
-                  accessibilityLabel="Open notifications"
-                  style={styles.iconButton}
-                  onPress={() => router.push("/notifications")}
-                >
-                  <SymbolView
-                    name={{
-                      ios: "bell.fill",
-                      android: "notifications",
-                      web: "notifications",
-                    }}
-                    size={21}
-                    tintColor="#17211D"
+                ))}
+                {visibleBanners.length === 0 && (
+                  <LinearGradient
+                    colors={topGradientColors as [string, string, string]}
+                    locations={[0, 0.5, 1]}
+                    start={{ x: 0.5, y: 0 }}
+                    end={{ x: 0.5, y: 1 }}
+                    style={StyleSheet.absoluteFill}
                   />
-                </Pressable>
-                <Pressable
-                  accessibilityLabel="Open wishlist"
-                  style={styles.iconButton}
-                  onPress={() => router.push("/wishlist")}
-                >
-                  <SymbolView
-                    name={{
-                      ios: "heart",
-                      android: "favorite",
-                      web: "favorite",
-                    }}
-                    size={21}
-                    tintColor="#17211D"
-                  />
-                </Pressable>
-              </View>
-            </View>
+                )}
+              </>
+            )}
           </View>
+
+          {/* ─── Header ─── */}
           <View
-  style={[
-    styles.stickySearchAndCategories,
-    {
-      borderBottomColor: `rgba(23, 33, 29, ${0.06 + stickyBackgroundOpacity * 0.3})`,
-    },
-    stickyBackgroundOpacity > 0 &&
-    styles.stickySearchAndCategoriesVisible,
-  ]}
->
-  <BlurView
-    intensity={Math.round(stickyBackgroundOpacity * 60)}
-    tint="light"
-    style={StyleSheet.absoluteFill}
-  />
-  <Pressable
-    style={[
-      styles.searchPromptBar,
-      { marginBottom: 10 - stickyBackgroundOpacity * 8 },
-    ]}
-              onPress={() => void openSearch()}
-              accessibilityLabel="Open search"
+            style={[s.header, { paddingTop: Math.max(insets.top, 12) + 8 }]}
+            onLayout={(e) => setHeaderH(e.nativeEvent.layout.height)}
+          >
+            <View style={s.headerLeft}>
+              <ThemedText style={s.greeting}>{getGreeting()}</ThemedText>
+              <ThemedText style={s.headline} numberOfLines={1}>
+                {storeName || activeStore?.name || "Store"}
+              </ThemedText>
+              {!!storeAddress && (
+                <ThemedText style={s.storeAddress} numberOfLines={1}>
+                  {storeAddress}
+                </ThemedText>
+              )}
+            </View>
+            <Pressable
+              style={s.headerIconBtn}
+              onPress={() => router.push("/notifications")}
+              accessibilityLabel="Open notifications"
             >
               <SymbolView
                 name={{
-                  ios: "magnifyingglass",
-                  android: "search",
-                  web: "search",
+                  ios: "bell",
+                  android: "notifications",
+                  web: "notifications",
                 }}
-                size={18}
-                tintColor="#17211D"
+                size={22}
+                tintColor="#1A1A1A"
               />
-                <TextInput
-                  value={query}
-                  editable={false}
-                  pointerEvents="none"
-                  placeholder={`Search for "${searchSuggestions[searchSuggestionIndex]}"`}
-                  placeholderTextColor="#7A847D"
-                  style={styles.promptInput}
-                />
-                <View style={styles.searchDivider} />
-                <View style={styles.voiceButton}>
-                <SymbolView
-                  name={{ ios: "mic.fill", android: "mic", web: "mic" }}
-                  size={17}
-                  tintColor="#17211D"
+              {unreadCount > 0 && (
+                <View style={s.notifBadge}>
+                  <ThemedText style={s.notifBadgeText}>
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </ThemedText>
+                </View>
+              )}
+            </Pressable>
+          </View>
+          {/* ─── Search Bar (in page) ─── */}
+          {/* space where the floating search bar sits at rest */}
+          <View style={{ height: 12 + 54 + 12 + 8 }} />
+
+          {/* ─── Hero Banner ─── */}
+          {visibleBanners.length > 0 ? (
+            <ScrollView
+              key={activeCategory}
+              horizontal
+              pagingEnabled
+              snapToInterval={Dimensions.get("window").width - 48 + 12}
+              decelerationRate="fast"
+              showsHorizontalScrollIndicator={false}
+              style={s.heroBannerWrap}
+              contentContainerStyle={{ gap: 12 }}
+              onScroll={handleBannerScroll}
+              scrollEventThrottle={16}
+            >
+              {visibleBanners.map((banner) => (
+                <Pressable
+                  key={banner.id}
+                  style={s.heroCard}
+                  disabled={!banner.productId}
+                  onPress={() =>
+                    banner.productId &&
+                    router.push({
+                      pathname: "/product/[id]",
+                      params: { id: banner.productId },
+                    })
+                  }
+                >
+                  <Image
+                    source={{ uri: banner.image }}
+                    style={StyleSheet.absoluteFill}
+                    contentFit="cover"
+                  />
+                </Pressable>
+              ))}
+            </ScrollView>
+          ) : !isForYou ? null : (
+            <View style={s.heroBannerWrap}>
+              <View style={s.heroCard}>
+                <Image
+                  source={
+                    heroProduct
+                      ? { uri: heroProduct.image }
+                      : require("@/assets/images/video1.gif")
+                  }
+                  style={StyleSheet.absoluteFill}
+                  contentFit="cover"
                 />
               </View>
-            </Pressable>
-            <View style={styles.categorySection}>
+            </View>
+          )}
+
+          {/* ─── Categories ─── */}
+          <View
+            style={s.categoriesSection}
+            onLayout={(e) =>
+              setCatLayout({
+                y: e.nativeEvent.layout.y,
+                h: e.nativeEvent.layout.height,
+              })
+            }
+          >
+            <View style={s.categoriesHeader}>
+              <ThemedText style={s.sectionTitle}>Categories</ThemedText>
+              {/* <View style={s.genderTabs}>
+                {genderTabs.map((tab) => (
+                  <Pressable
+                    key={tab}
+                    style={[
+                      s.genderTab,
+                      activeGenderTab === tab && s.genderTabActive,
+                    ]}
+                    onPress={() => setActiveGenderTab(tab)}
+                  >
+                    <ThemedText
+                      style={[
+                        s.genderTabText,
+                        activeGenderTab === tab && s.genderTabTextActive,
+                      ]}
+                    >
+                      {tab}
+                    </ThemedText>
+                  </Pressable>
+                ))}
+              </View> */}
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={s.categoriesRow}
+            >
+              {[
+                {
+                  id: FOR_YOU,
+                  name: "For You",
+                  emoji: "✨",
+                  image: undefined as string | undefined,
+                },
+                ...categories.map((cat, idx) => ({
+                  id: cat.id,
+                  name: cat.name,
+                  emoji:
+                    categoryDisplayData[idx % categoryDisplayData.length].emoji,
+                  image: cat.image ? apiImageUrl(cat.image) : undefined,
+                })),
+              ].map((cat) => (
+                <Pressable
+                  key={cat.id}
+                  style={s.categoryItem}
+                  onPress={() => selectCategory(cat.id)}
+                >
+                  <View
+                    style={[
+                      s.categoryCircle,
+                      activeCategory === cat.id && s.categoryCircleActive,
+                    ]}
+                  >
+                    {cat.image ? (
+                      <Image
+                        source={{ uri: cat.image }}
+                        style={s.categoryCircleImage}
+                        contentFit="cover"
+                      />
+                    ) : (
+                      <ThemedText style={s.categoryEmoji}>
+                        {cat.emoji}
+                      </ThemedText>
+                    )}
+                  </View>
+                  <ThemedText style={s.categoryLabel}>{cat.name}</ThemedText>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+
+          {/* ─── For You ─── */}
+          {isForYou && products.length > 0 && (
+            <View style={s.forYouSection}>
+              <View style={s.featuredHeader}>
+                <ThemedText style={s.sectionTitle}>For You</ThemedText>
+                <Pressable onPress={() => router.push("/products")}>
+                  <ThemedText style={s.seeAllText}>See All</ThemedText>
+                </Pressable>
+              </View>
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.categoryRow}
+                contentContainerStyle={s.forYouRow}
               >
-                {[{ id: "All", name: "All" }, ...categories].map((category) => {
-                  const icon = getCategoryIcon(category.name);
-                  const categoryImageUrl = category.image
-                    ? apiImageUrl(category.image)
-                    : undefined;
-                  const emojiIcon = category.icon || "";
-                  const useImage = Boolean(categoryImageUrl);
-                  const useEmoji = !useImage && Boolean(emojiIcon);
-                  return (
-                    <Pressable
-                      key={category.id}
-                      onPress={() => setActiveCategory(category.id)}
-                      style={[
-                        styles.categoryChip,
-                        activeCategory === category.id &&
-                          styles.categoryChipActive,
-                      ]}
-                    >
-                      {null}
-                      <ThemedText
-                        style={[
-                          styles.categoryText,
-                          activeCategory === category.id &&
-                            styles.categoryTextActive,
-                        ]}
-                      >
-                        {category.name}
-                      </ThemedText>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-              <View style={styles.categoryDivider} />
-            </View>
-          </View>
-          {banners.length > 0 ? (
-  <ScrollView
-    horizontal
-    showsHorizontalScrollIndicator={false}
-    style={styles.heroGifWrap}
-    contentContainerStyle={{ borderRadius: 24 }}
-  >
-    {banners.map((banner) => (
-      <Image
-        key={banner.id}
-        source={{ uri: banner.image }}
-        style={{ width: 360, height: 220, borderRadius: 24, marginRight: 12 }}
-        contentFit="cover"
-      />
-    ))}
-  </ScrollView>
-) : (
-  <View style={styles.heroGifWrap}>
-    <Image
-      source={require("@/assets/images/video1.gif")}
-      style={styles.heroGif}
-      contentFit="cover"
-    />
-  </View>
-)}
-          {inspirationProducts.length > 0 && (
-            <View style={styles.shopNowWrap}>
-              <View style={styles.shopNowHeader}>
-                <ThemedText style={styles.sectionTitle}>SHOP NOW</ThemedText>
-              </View>
-              <View style={styles.shopNowRow}>
-                {inspirationProducts.map((product, index) => {
+                {products.slice(0, 10).map((product) => {
                   const isSaved = isWishlisted(product.id);
-                  const cartItem = cartItems.find(
-                    (item) => item.id === product.id,
-                  );
-                  const ratingOptions = [4.8, 4.9, 4.7];
-                  const rating = ratingOptions[index % ratingOptions.length];
-
                   return (
                     <Pressable
                       key={product.id}
-                      style={[
-                        styles.inspoCard,
-                        index === 1 && styles.inspoCardCenter,
-                      ]}
+                      style={s.forYouCard}
                       onPress={() =>
                         router.push({
                           pathname: "/product/[id]",
@@ -682,42 +1080,192 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
                         })
                       }
                     >
-                      <View style={styles.inspoImageWrap}>
-                        <View style={styles.inspoImageBox}>
-                          <Image
-                            source={{ uri: product.image }}
-                            style={styles.inspoImage}
-                            contentFit="cover"
-                          />
-                        </View>
+                      <View style={s.forYouImageWrap}>
+                        <Image
+                          source={{ uri: product.image }}
+                          style={s.forYouImage}
+                          contentFit="cover"
+                        />
                         <Pressable
-                          style={styles.inspoSave}
+                          style={s.heartBtn}
                           onPress={(event) => {
                             event.stopPropagation();
                             void toggleWishlist(product);
                           }}
                         >
-                          <SymbolView
-                            name={isSaved ? "heart.fill" : "heart"}
-                            size={13}
-                            tintColor={isSaved ? "#D5684A" : "#17211D"}
+                          <Ionicons
+                            name={isSaved ? "heart" : "heart-outline"}
+                            size={18}
+                            color={isSaved ? "#E8634A" : "#444444"}
+                          />
+                        </Pressable>
+                      </View>
+                      <ThemedText style={s.forYouName} numberOfLines={1}>
+                        {product.name}
+                      </ThemedText>
+                      <ThemedText style={s.forYouPrice}>
+                        {product.price > 0
+                          ? `₹${product.price}`
+                          : "PRICE ON REQUEST"}
+                      </ThemedText>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          )}
+
+          {/* ─── Secondary Banner ─── */}
+          {!isForYou &&
+          visibleBanners.length <= 1 ? null : visibleBanners.length > 1 ? (
+            <View style={s.secondaryBannerWrap}>
+              <View style={s.secondaryBannerCard}>
+                <LinearGradient
+                  colors={
+                    buildPalette(visibleBanners[1].color).hero as unknown as [
+                      string,
+                      string,
+                      string,
+                    ]
+                  }
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={StyleSheet.absoluteFill}
+                />
+                <View style={s.secondaryBannerTextArea}>
+                  <View style={s.heroNewBadge}>
+                    <ThemedText style={s.heroNewBadgeText}>
+                      LIMITED TIME
+                    </ThemedText>
+                  </View>
+                  <ThemedText style={s.secondaryBannerTitle} numberOfLines={2}>
+                    {visibleBanners[1].name}
+                  </ThemedText>
+                  {visibleBanners[1].productId && (
+                    <Pressable
+                      style={s.heroTryBtn}
+                      onPress={() =>
+                        router.push({
+                          pathname: "/product/[id]",
+                          params: { id: visibleBanners[1].productId! },
+                        })
+                      }
+                    >
+                      <ThemedText style={s.heroTryBtnText}>SHOP NOW</ThemedText>
+                    </Pressable>
+                  )}
+                </View>
+                <Image
+                  source={{ uri: visibleBanners[1].image }}
+                  style={s.secondaryBannerImage}
+                  contentFit="cover"
+                />
+              </View>
+            </View>
+          ) : (
+            <View style={s.secondaryBannerWrap}>
+              <View style={s.secondaryBannerCard}>
+                <LinearGradient
+                  colors={["#245C55", "#3B7A6E", "#5A9C8C"]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={StyleSheet.absoluteFill}
+                />
+                <View style={s.secondaryBannerTextArea}>
+                  <View style={s.heroNewBadge}>
+                    <ThemedText style={s.heroNewBadgeText}>
+                      LIMITED TIME
+                    </ThemedText>
+                  </View>
+                  <ThemedText style={s.secondaryBannerTitle}>
+                    Bundle & Save{"\n"}This Week
+                  </ThemedText>
+                  <Pressable style={s.heroTryBtn}>
+                    <ThemedText style={s.heroTryBtnText}>SHOP NOW</ThemedText>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          )}
+
+          {/* ─── Featured Products ─── */}
+          <View style={s.featuredSection}>
+            <View style={s.featuredHeader}>
+              <ThemedText style={s.sectionTitle}>
+                {isForYou ? "Featured Products" : activeCategoryName}
+              </ThemedText>
+              <Pressable
+                onPress={() =>
+                  isForYou
+                    ? router.push("/products")
+                    : router.push({
+                        pathname: "/products",
+                        params: {
+                          categoryId: activeCategory,
+                          categoryName: activeCategoryName,
+                        },
+                      })
+                }
+              >
+                <ThemedText style={s.seeAllText}>See All</ThemedText>
+              </Pressable>
+            </View>
+            <View style={s.productGrid}>
+              {filteredProducts.map((product, index) => {
+                const isSaved = isWishlisted(product.id);
+                const cartItem = cartItems.find(
+                  (item) => item.id === product.id,
+                );
+
+                return (
+                  <View key={product.id} style={s.productSlot}>
+                    <Pressable
+                      style={s.productCard}
+                      onPress={() =>
+                        router.push({
+                          pathname: "/product/[id]",
+                          params: { id: product.id },
+                        })
+                      }
+                    >
+                      <View style={s.productImageWrap}>
+                        <SlidingProductImage
+                          images={
+                            product.colors?.length
+                              ? product.colors.map((c) => c.image)
+                              : [product.image]
+                          }
+                          activeIndex={selectedColorIndex[product.id] ?? 0}
+                          style={s.productImage}
+                        />
+                        <Pressable
+                          style={s.heartBtn}
+                          onPress={(event) => {
+                            event.stopPropagation();
+                            void toggleWishlist(product);
+                          }}
+                        >
+                          <Ionicons
+                            name={isSaved ? "heart" : "heart-outline"}
+                            size={18}
+                            color={isSaved ? "#E8634A" : "#444444"}
                           />
                         </Pressable>
                         {cartItem ? (
-                          <View style={styles.inspoCartControls}>
+                          <View style={s.cartControls}>
                             <Pressable
                               accessibilityLabel={`Remove one ${product.name} from cart`}
                               onPress={(event) => {
                                 event.stopPropagation();
                                 void changeProductQuantity(product, -1);
                               }}
-                              style={styles.inspoQuantityButton}
+                              style={s.cartQtyBtn}
                             >
-                              <ThemedText style={styles.inspoQuantityText}>
+                              <ThemedText style={s.cartQtyBtnText}>
                                 −
                               </ThemedText>
                             </Pressable>
-                            <ThemedText style={styles.inspoQuantityValue}>
+                            <ThemedText style={s.cartQtyValue}>
                               {cartItem.quantity}
                             </ThemedText>
                             <Pressable
@@ -726,9 +1274,9 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
                                 event.stopPropagation();
                                 void changeProductQuantity(product, 1);
                               }}
-                              style={styles.inspoQuantityButton}
+                              style={s.cartQtyBtn}
                             >
-                              <ThemedText style={styles.inspoQuantityText}>
+                              <ThemedText style={s.cartQtyBtnText}>
                                 +
                               </ThemedText>
                             </Pressable>
@@ -736,7 +1284,7 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
                         ) : (
                           <Pressable
                             accessibilityLabel={`Add ${product.name} to cart`}
-                            style={styles.inspoCart}
+                            style={s.addCartBtn}
                             onPress={(event) => {
                               event.stopPropagation();
                               void addProduct(product);
@@ -748,259 +1296,131 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
                                 android: "add_shopping_cart",
                                 web: "add_shopping_cart",
                               }}
-                              size={14}
+                              size={13}
                               tintColor="#ffffff"
                             />
                           </Pressable>
                         )}
                       </View>
-                      <View style={styles.inspoMeta}>
-                        <ThemedText style={styles.inspoName}>
+                      <View style={s.productInfo}>
+                        <ThemedText style={s.productName} numberOfLines={1}>
                           {product.name}
                         </ThemedText>
-                        <ThemedText style={styles.inspoPrice}>
+                        <ThemedText style={s.productPrice}>
                           {product.price > 0
-                            ? `MRP ₹${product.price}`
+                            ? `₹${product.price}`
                             : "PRICE ON REQUEST"}
                         </ThemedText>
-
-                        <View style={styles.inspoDetailsRow}>
-                          <ThemedText style={styles.inspoDetailLabel}>
-                            Rating
-                          </ThemedText>
-                          <ThemedText style={styles.inspoDetailValue}>
-                            {rating.toFixed(1)} / 5
-                          </ThemedText>
-                        </View>
                       </View>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </View>
-          )}
-          <View style={styles.brandSection}>
-            <View style={styles.sectionHeader}>
-              <ThemedText style={styles.sectionTitle}>Brands</ThemedText>
-              <ThemedText style={styles.seeAll}>Explore all</ThemedText>
-            </View>
-            <View style={styles.brandGallery}>
-              {brandColumns.map((column, columnIndex) => (
-                <View
-                  key={`brand-column-${columnIndex}`}
-                  style={styles.brandColumn}
-                >
-                  {column.map((item, index) => (
-                    <View
-                      key={`brand-${columnIndex}-${index}`}
-                      style={[
-                        styles.brandCard,
-                        { height: item.height },
-                        columnIndex === 1
-                          ? { marginTop: item.offset ?? 0 }
-                          : null,
-                      ]}
-                    >
-                      <Image
-                        source={item.image}
-                        style={styles.brandImage}
-                        contentFit="cover"
-                      />
-                      <LinearGradient
-                        colors={[
-                          "rgba(0,0,0,0.55)",
-                          "rgba(0,0,0,0.15)",
-                          "rgba(0,0,0,0)",
-                        ]}
-                        locations={[0, 0.5, 1]}
-                        start={{ x: 0.5, y: 1 }}
-                        end={{ x: 0.5, y: 0 }}
-                        style={styles.brandGradient}
-                      />
-                      <ThemedText style={styles.brandTitle}>
-                        {item.title}
-                      </ThemedText>
-                    </View>
-                  ))}
-                </View>
-              ))}
-            </View>
-          </View>
-          <View style={styles.imageBanner}>
-            <VideoView
-              style={styles.imageBannerPhoto}
-              player={bannerPlayer}
-              nativeControls={false}
-            />
-          </View>
-          <View style={[styles.sectionHeader, styles.productsHeader]}>
-            <ThemedText style={styles.sectionTitle}>New arrivals</ThemedText>
-            <ThemedText style={styles.countText}>
-              {filteredProducts.length} ITEMS
-            </ThemedText>
-          </View>
-          <View style={styles.productGrid}>
-            {filteredProducts.map((product, index) => {
-              const isSaved = isWishlisted(product.id);
-              const cartItem = cartItems.find((item) => item.id === product.id);
-              const ratingOptions = [4.8, 4.9, 4.7];
-              const rating = ratingOptions[index % ratingOptions.length];
-
-              return (
-                <View key={product.id} style={styles.productSlot}>
-                  <Pressable
-                    style={styles.inspoCard}
-                    onPress={() =>
-                      router.push({
-                        pathname: "/product/[id]",
-                        params: { id: product.id },
-                      })
-                    }
-                  >
-                    <View style={styles.inspoImageWrap}>
-                      <View style={styles.inspoImageBox}>
-                        <Image
-                          source={{ uri: product.image }}
-                          style={styles.inspoImage}
-                          contentFit="cover"
-                        />
-                      </View>
-                      <Pressable
-                        style={styles.inspoSave}
-                        onPress={(event) => {
-                          event.stopPropagation();
-                          void toggleWishlist(product);
-                        }}
-                      >
-                        <SymbolView
-                          name={isSaved ? "heart.fill" : "heart"}
-                          size={13}
-                          tintColor={isSaved ? "#D5684A" : "#17211D"}
-                        />
-                      </Pressable>
-                      {cartItem ? (
-                        <View style={styles.inspoCartControls}>
-                          <Pressable
-                            accessibilityLabel={`Remove one ${product.name} from cart`}
-                            onPress={(event) => {
-                              event.stopPropagation();
-                              void changeProductQuantity(product, -1);
-                            }}
-                            style={styles.inspoQuantityButton}
-                          >
-                            <ThemedText style={styles.inspoQuantityText}>
-                              −
-                            </ThemedText>
-                          </Pressable>
-                          <ThemedText style={styles.inspoQuantityValue}>
-                            {cartItem.quantity}
-                          </ThemedText>
-                          <Pressable
-                            accessibilityLabel={`Add another ${product.name} to cart`}
-                            onPress={(event) => {
-                              event.stopPropagation();
-                              void changeProductQuantity(product, 1);
-                            }}
-                            style={styles.inspoQuantityButton}
-                          >
-                            <ThemedText style={styles.inspoQuantityText}>
-                              +
-                            </ThemedText>
-                          </Pressable>
+                      {product.colors && product.colors.length > 1 && (
+                        <View style={s.colorSwatchRow}>
+                          {product.colors.map((c, idx) => (
+                            <Pressable
+                              key={`${c.color}-${idx}`}
+                              accessibilityLabel={`Select ${c.color}`}
+                              onPress={(event) => {
+                                event.stopPropagation();
+                                setSelectedColorIndex((prev) => ({
+                                  ...prev,
+                                  [product.id]: idx,
+                                }));
+                              }}
+                              style={[
+                                s.colorSwatch,
+                                { backgroundColor: c.color.toLowerCase() },
+                                (selectedColorIndex[product.id] ?? 0) === idx &&
+                                  s.colorSwatchActive,
+                              ]}
+                            />
+                          ))}
                         </View>
-                      ) : (
-                        <Pressable
-                          accessibilityLabel={`Add ${product.name} to cart`}
-                          style={styles.inspoCart}
-                          onPress={(event) => {
-                            event.stopPropagation();
-                            void addProduct(product);
-                          }}
-                        >
-                          <SymbolView
-                            name={{
-                              ios: "cart.fill",
-                              android: "add_shopping_cart",
-                              web: "add_shopping_cart",
-                            }}
-                            size={14}
-                            tintColor="#ffffff"
-                          />
-                        </Pressable>
                       )}
-                    </View>
-                    <View style={styles.inspoMeta}>
-                      <ThemedText style={styles.inspoName}>
-                        {product.name}
-                      </ThemedText>
-                      <ThemedText style={styles.inspoPrice}>
-                        {product.price > 0
-                          ? `MRP ₹${product.price}`
-                          : "PRICE ON REQUEST"}
-                      </ThemedText>
-
-                      <View
-                        style={[
-                          styles.inspoDetailsRow,
-                          styles.inspoDetailsRowTight,
-                        ]}
-                      >
-                        <ThemedText style={styles.inspoDetailLabel}>
-                          Rating
-                        </ThemedText>
-                        <ThemedText style={styles.inspoDetailValue}>
-                          {rating.toFixed(1)} / 5
-                        </ThemedText>
-                      </View>
-                      <ThemedText
-                        style={styles.productDescription}
-                        numberOfLines={2}
-                      >
-                        {product.description || "No description available"}
-                      </ThemedText>
-                      <ThemedText
-                        style={styles.productParameters}
-                        numberOfLines={3}
-                      >
-                        Category: {product.category} · Unit:{" "}
-                        {product.unit || "N/A"}
-                        {"\n"}Size: {product.size || "N/A"} · Weight:{" "}
-                        {product.weight || "N/A"}
-                        {"\n"}Delivery: {product.deliveryTime || "N/A"} · Code:{" "}
-                        {product.productCode || "N/A"}
-                      </ThemedText>
-                    </View>
-                  </Pressable>
-                </View>
-              );
-            })}
+                    </Pressable>
+                  </View>
+                );
+              })}
+            </View>
+            {!isForYou && filteredProducts.length === 0 && (
+              <ThemedText
+                style={{ textAlign: "center", color: "#999", marginTop: 24 }}
+              >
+                No products in this category yet.
+              </ThemedText>
+            )}
           </View>
         </ScrollView>
-        {couponOpen && (
-          <View style={styles.coupon}>
-            <Pressable
-              accessibilityLabel="Close coupon"
-              onPress={() => setCouponOpen(false)}
-              style={styles.couponClose}
-            >
-              <ThemedText style={styles.couponCloseText}>×</ThemedText>
-            </Pressable>
-            <ThemedText style={styles.couponKicker}>
-              FIRST DROP / COUPON
-            </ThemedText>
-            <ThemedText style={styles.couponTitle}>
-              A little extra{`\n`}for your cart.
-            </ThemedText>
-            <ThemedText style={styles.couponText}>
-              Take 15% off your first order with this code.
-            </ThemedText>
-            <View style={styles.couponCode}>
-              <ThemedText style={styles.couponCodeText}>ESHOP15</ThemedText>
-              <ThemedText style={styles.couponCopy}>COPY</ThemedText>
-            </View>
-          </View>
-        )}
-              </SafeAreaView>
+      </View>
+
+      {/* ─── Blur layer: full width, from the very top of the screen ─── */}
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: insets.top + 12 + 54 + 12,
+          opacity: blurOpacity,
+          zIndex: 20,
+        }}
+      >
+        <BlurView
+          intensity={70}
+          tint="light"
+          experimentalBlurMethod="dimezisBlurView"
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
+
+      {/* ─── The one and only search bar ─── */}
+      <Animated.View
+        style={{
+          position: "absolute",
+          top: pillTop,
+          left: 24,
+          right: 24,
+          zIndex: 21,
+        }}
+      >
+        {renderSearchPill()}
+      </Animated.View>
+
+            {categories.length > 0 && (
+        <Animated.View
+          pointerEvents={chipsActive ? "auto" : "none"}
+          style={[s.catBar, { top: catBarTop, opacity: catBarOpacity }]}
+        >
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={s.catBarRow}
+            keyboardShouldPersistTaps="handled"
+          >
+            {[
+              { id: FOR_YOU, name: "For You" },
+              ...categories.map((c) => ({ id: c.id, name: c.name })),
+            ].map((c) => (
+              <Pressable
+                key={c.id}
+                style={s.catBarItem}
+                onPress={() => selectCategory(c.id)}
+              >
+                <ThemedText
+                  style={[
+                    s.catBarText,
+                    activeCategory === c.id && s.catBarTextActive,
+                  ]}
+                >
+                  {c.name}
+                </ThemedText>
+                {activeCategory === c.id && <View style={s.catBarUnderline} />}
+              </Pressable>
+            ))}
+          </ScrollView>
+        </Animated.View>
+      )}
+
+      {/* ─── Search Modal (unchanged logic) ─── */}
       <Modal
         visible={searchOpen}
         animationType="slide"
@@ -1008,298 +1428,590 @@ console.log("[Banner] raw response", JSON.stringify(bannerResponse));
         onRequestClose={() => setSearchOpen(false)}
       >
         <SafeAreaProvider>
-        <SafeAreaView style={styles.searchScreen}>
-          <View style={styles.searchScreenTopBar}>
-            <Pressable
-              onPress={() => setSearchOpen(false)}
-              accessibilityLabel="Close search"
-              style={styles.searchScreenClose}
-            >
-              <SymbolView
-                name={{ ios: "arrow.left", android: "arrow_back", web: "arrow_back" }}
-                size={22}
-                tintColor="#17211D"
-              />
-            </Pressable>
-            <View style={styles.searchScreenInputWrap}>
-              <SymbolView
-                name={{ ios: "magnifyingglass", android: "search", web: "search" }}
-                size={18}
-                tintColor="#748078"
-              />
-              <TextInput
-                autoFocus
-                value={query}
-                onChangeText={setQuery}
-                placeholder="Search products"
-                placeholderTextColor="#748078"
-                returnKeyType="search"
-                onSubmitEditing={() => void submitSearch(query)}
-                style={styles.searchScreenInput}
-              />
-              <Pressable accessibilityLabel="Voice search">
+          <SafeAreaView style={s.searchScreen}>
+            <View style={s.searchScreenTopBar}>
+              <Pressable
+                onPress={() => setSearchOpen(false)}
+                accessibilityLabel="Close search"
+                style={s.searchScreenClose}
+              >
                 <SymbolView
-                  name={{ ios: "mic.fill", android: "mic", web: "mic" }}
-                  size={17}
-                  tintColor="#748078"
+                  name={{
+                    ios: "arrow.left",
+                    android: "arrow_back",
+                    web: "arrow_back",
+                  }}
+                  size={22}
+                  tintColor="#1A1A1A"
                 />
               </Pressable>
-            </View>
-          </View>
-
-          <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.searchScreenScrollContent}
-            keyboardShouldPersistTaps="handled"
-          >
-            <View style={styles.recentSearchesHeaderRow}>
-              <ThemedText style={styles.recentSearchesTitle}>
-                Recent Searches
-              </ThemedText>
-              {recentSearches.length > 0 && (
-                <Pressable onPress={() => void clearRecentSearches()}>
-                  <ThemedText style={styles.searchEditLink}>Edit</ThemedText>
+              <View style={s.searchScreenInputWrap}>
+                <SymbolView
+                  name={{
+                    ios: "magnifyingglass",
+                    android: "search",
+                    web: "search",
+                  }}
+                  size={18}
+                  tintColor="#999"
+                />
+                <TextInput
+                  autoFocus
+                  value={query}
+                  onChangeText={setQuery}
+                  placeholder={
+                    voice.listening ? "Listening..." : "Search products"
+                  }
+                  placeholderTextColor="#999"
+                  returnKeyType="search"
+                  onSubmitEditing={() => void submitSearch(query)}
+                  style={s.searchScreenInput}
+                />
+                <Pressable
+                  accessibilityLabel="Voice search"
+                  onPress={voice.toggle}
+                  hitSlop={10}
+                >
+                  <SymbolView
+                    name={{ ios: "mic.fill", android: "mic", web: "mic" }}
+                    size={20}
+                    tintColor={voice.listening ? "#E8634A" : "#999"}
+                  />
                 </Pressable>
-              )}
+              </View>
             </View>
 
-            {recentSearches.length === 0 ? (
-              <ThemedText style={styles.noRecentSearches}>
-                No recent searches
-              </ThemedText>
-            ) : (
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.recentSearchesRow}
-              >
-                {recentSearches.map((search) => (
-                  <Pressable
-                    key={search}
-                    style={styles.recentSearchChip}
-                    onPress={() => selectRecentSearch(search)}
-                  >
-                    <View style={styles.recentSearchChipIcon}>
-                      <SymbolView
-                        name={{ ios: "clock", android: "history", web: "history" }}
-                        size={20}
-                        tintColor="#748078"
-                      />
-                    </View>
-                    <ThemedText style={styles.recentSearchChipLabel} numberOfLines={1}>
-                      {search}
-                    </ThemedText>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={s.searchScreenScrollContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              <View style={s.recentSearchesHeaderRow}>
+                <ThemedText style={s.recentSearchesTitle}>
+                  Recent Searches
+                </ThemedText>
+                {recentSearches.length > 0 && (
+                  <Pressable onPress={() => void clearRecentSearches()}>
+                    <ThemedText style={s.searchEditLink}>Edit</ThemedText>
                   </Pressable>
-                ))}
-              </ScrollView>
-            )}
-
-            {categories.length > 0 && (
-              <View style={styles.recommendedSection}>
-                <ThemedText style={styles.recentSearchesTitle}>
-                  Recommended Stores
-                </ThemedText>
-                <View style={styles.recommendedGrid}>
-                  {categories.slice(0, 3).map((category) => {
-                    const categoryImageUrl = category.image
-                      ? apiImageUrl(category.image)
-                      : undefined;
-                    return (
-                      <Pressable
-                        key={category.id}
-                        style={styles.recommendedCard}
-                        onPress={() => {
-                          setActiveCategory(category.id);
-                          setSearchOpen(false);
-                        }}
-                      >
-                        <View style={styles.recommendedImageBox}>
-                          {categoryImageUrl ? (
-                            <Image
-                              source={{ uri: categoryImageUrl }}
-                              style={styles.recommendedImage}
-                              contentFit="cover"
-                            />
-                          ) : (
-                            <SymbolView
-                              name={{ ios: "bag.fill", android: "shopping_bag", web: "shopping_bag" }}
-                              size={26}
-                              tintColor="#748078"
-                            />
-                          )}
-                        </View>
-                        <ThemedText style={styles.recommendedLabel} numberOfLines={1}>
-                          {category.name}
-                        </ThemedText>
-                      </Pressable>
-                    );
-                  })}
-                </View>
+                )}
               </View>
-            )}
 
-            {products.length > 0 && (
-              <View style={styles.trendingSection}>
-                <ThemedText style={styles.recentSearchesTitle}>
-                  Trending Today
+              {recentSearches.length === 0 ? (
+                <ThemedText style={s.noRecentSearches}>
+                  No recent searches
                 </ThemedText>
+              ) : (
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.trendingRow}
+                  contentContainerStyle={s.recentSearchesRow}
                 >
-                  {products.slice(0, 6).map((product) => (
+                  {recentSearches.map((search) => (
                     <Pressable
-                      key={product.id}
-                      style={styles.trendingCard}
-                      onPress={() => {
-                        setSearchOpen(false);
-                        router.push({
-                          pathname: "/product/[id]",
-                          params: { id: product.id },
-                        });
-                      }}
+                      key={search}
+                      style={s.recentSearchChip}
+                      onPress={() => selectRecentSearch(search)}
                     >
-                      <Image
-                        source={{ uri: product.image }}
-                        style={styles.trendingImage}
-                        contentFit="cover"
-                      />
-                      <ThemedText style={styles.trendingLabel} numberOfLines={2}>
-                        {product.name}
+                      <View style={s.recentSearchChipIcon}>
+                        <SymbolView
+                          name={{
+                            ios: "clock",
+                            android: "history",
+                            web: "history",
+                          }}
+                          size={20}
+                          tintColor="#999"
+                        />
+                      </View>
+                      <ThemedText
+                        style={s.recentSearchChipLabel}
+                        numberOfLines={1}
+                      >
+                        {search}
                       </ThemedText>
                     </Pressable>
                   ))}
                 </ScrollView>
-              </View>
-            )}
-          </ScrollView>
+              )}
+
+              {categories.length > 0 && (
+                <View style={s.recommendedSection}>
+                  <ThemedText style={s.recentSearchesTitle}>
+                    Recommended Stores
+                  </ThemedText>
+                  <View style={s.recommendedGrid}>
+                    {categories.slice(0, 3).map((category) => {
+                      const categoryImageUrl = category.image
+                        ? apiImageUrl(category.image)
+                        : undefined;
+                      return (
+                        <Pressable
+                          key={category.id}
+                          style={s.recommendedCard}
+                          onPress={() => {
+                            setActiveCategory(category.id);
+                            setSearchOpen(false);
+                          }}
+                        >
+                          <View style={s.recommendedImageBox}>
+                            {categoryImageUrl ? (
+                              <Image
+                                source={{ uri: categoryImageUrl }}
+                                style={s.recommendedImage}
+                                contentFit="cover"
+                              />
+                            ) : (
+                              <SymbolView
+                                name={{
+                                  ios: "bag.fill",
+                                  android: "shopping_bag",
+                                  web: "shopping_bag",
+                                }}
+                                size={26}
+                                tintColor="#999"
+                              />
+                            )}
+                          </View>
+                          <ThemedText
+                            style={s.recommendedLabel}
+                            numberOfLines={1}
+                          >
+                            {category.name}
+                          </ThemedText>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
+
+              {products.length > 0 && (
+                <View style={s.trendingSection}>
+                  <ThemedText style={s.recentSearchesTitle}>
+                    Trending Today
+                  </ThemedText>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={s.trendingRow}
+                  >
+                    {products.slice(0, 6).map((product) => (
+                      <Pressable
+                        key={product.id}
+                        style={s.trendingCard}
+                        onPress={() => {
+                          setSearchOpen(false);
+                          router.push({
+                            pathname: "/product/[id]",
+                            params: { id: product.id },
+                          });
+                        }}
+                      >
+                        <Image
+                          source={{ uri: product.image }}
+                          style={s.trendingImage}
+                          contentFit="cover"
+                        />
+                        <ThemedText style={s.trendingLabel} numberOfLines={2}>
+                          {product.name}
+                        </ThemedText>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+            </ScrollView>
           </SafeAreaView>
-          </SafeAreaProvider>
+        </SafeAreaProvider>
       </Modal>
     </ThemedView>
   );
 }
 
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: Colors.light.background },
-  safeArea: { flex: 1, width: "100%" },
-  topGradient: {
+const s = StyleSheet.create({
+  /* ─── Layout ─── */
+  screen: { flex: 1, backgroundColor: "#FAFAFA" },
+  safeArea: { flex: 1 },
+  scrollContent: { paddingBottom: 40 },
+  topGradientWrap: {
     position: "absolute",
     left: 0,
     right: 0,
     top: 0,
-    height: 720,
+    height: 400,
   },
-  content: { paddingHorizontal: 20, paddingBottom: 32 },
-  offerHero: {
-    minHeight: 280,
-    borderRadius: 4,
-    paddingHorizontal: 20,
-    paddingVertical: 30,
-    justifyContent: "space-between",
-    marginBottom: 30,
-    overflow: "hidden",
-  },
-  offerEyebrow: { fontSize: 10, letterSpacing: 2.2, fontWeight: "900" },
-  offerTitle: {
-    fontSize: 36,
-    lineHeight: 42,
-    fontWeight: "900",
-    letterSpacing: -1.2,
-    marginTop: 20,
-  },
-  offerDetail: { fontSize: 14, fontWeight: "700", marginTop: 12 },
-  offerFooter: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 24,
-  },
-  offerButton: { paddingHorizontal: 15, paddingVertical: 11, borderRadius: 3 },
-  offerButtonText: { fontSize: 11, fontWeight: "900", letterSpacing: 1.5 },
-  offerDots: { flexDirection: "row", gap: 6 },
-  offerDot: { width: 7, height: 7, borderRadius: 4 },
+
+  /* ─── Header ─── */
   header: {
-    width: "100%",
-    alignSelf: "stretch",
-    backgroundColor: "transparent",
-    borderBottomWidth: 0,
-    shadowColor: "transparent",
-    shadowOpacity: 0,
-    shadowRadius: 0,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 0,
-    zIndex: 10,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    paddingHorizontal: 24,
+    paddingTop: 12,
+    paddingBottom: 8,
   },
-  headerInner: {
-    width: "100%",
-    paddingTop: 10,
-    paddingBottom: 14,
-    paddingHorizontal: 20,
+  headerLeft: { flex: 1 },
+  greeting: {
+    fontSize: 14,
+    fontStyle: "italic",
+    color: "#9E7B6B",
+    fontWeight: "500",
+    marginBottom: 4,
+  },
+  headline: {
+    fontSize: 24,
+    fontWeight: "800",
+    color: "#1A1A1A",
+    letterSpacing: -0.5,
+  },
+  storeAddress: {
+    fontSize: 12,
+    fontWeight: "500",
+    color: "#7A6A60",
+    marginTop: 2,
+  },
+  headerIconBtn: {
+  width: 44,
+  height: 44,
+  borderRadius: 14,
+  backgroundColor: "rgba(255,255,255,0.7)",
+  alignItems: "center",
+  justifyContent: "center",
+  borderWidth: 1,
+  borderColor: "rgba(0,0,0,0.06)",
+  position: "relative",
+},
+
+  /* ─── Search Bar ─── */
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#FFFFFF",
+    borderRadius: 100,
+    marginHorizontal: 24,
+    marginTop: 16,
+    marginBottom: 20,
+    paddingLeft: 18,
+    paddingRight: 6,
+    height: 54,
+    shadowColor: "rgba(0,0,0,0.08)",
+    shadowOpacity: 1,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.04)",
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 15,
+    color: "#1A1A1A",
+    fontWeight: "400",
+    marginLeft: 10,
+  },
+  searchOrangeBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: "#F09148",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  /* ─── Hero Banner ─── */
+  heroBannerWrap: {
+    marginHorizontal: 24,
+    marginBottom: 28,
+  },
+  heroCard: {
+    width: Dimensions.get("window").width - 48,
+    height: 200,
+    borderRadius: 24,
+    overflow: "hidden",
+    flexDirection: "row",
+    position: "relative",
+  },
+  heroTextArea: {
+    flex: 1,
+    padding: 22,
+    justifyContent: "center",
+    zIndex: 2,
+  },
+  heroNewBadge: {
+    backgroundColor: "rgba(255,255,255,0.25)",
+    alignSelf: "flex-start",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    marginBottom: 10,
+  },
+  heroNewBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  heroProductName: {
+    color: "#FFFFFF",
+    fontSize: 22,
+    fontWeight: "800",
+    letterSpacing: -0.3,
+    lineHeight: 26,
+  },
+  heroPrice: {
+    color: "#FFFFFF",
+    fontSize: 20,
+    fontWeight: "800",
+    marginTop: 6,
+  },
+  heroTryBtn: {
+    backgroundColor: "#1A1A1A",
+    alignSelf: "flex-start",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginTop: 12,
+  },
+  heroTryBtnText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  heroImage: {
+    width: "45%",
+    height: "100%",
+    position: "absolute",
+    right: 0,
+    bottom: 0,
+  },
+
+  /* ─── Categories ─── */
+  categoriesSection: {
+    paddingHorizontal: 24,
+    marginBottom: 28,
+  },
+  categoriesHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "transparent",
-  },
-  headerMeta: {
-    flex: 1,
-    paddingRight: 12,
-  },
-  logo: {
-    fontSize: 25,
-    fontWeight: "800",
-    letterSpacing: -0.8,
-    color: "#17211D",
-  },
-  kicker: { fontSize: 9, letterSpacing: 2, color: "#ffffff", marginTop: 3 },
-  addressRow: {
-    marginTop: 6,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    alignSelf: "flex-start",
-  },
-  addressText: {
-    fontSize: 11,
-    color: "#000000",
-    fontWeight: "700",
-    letterSpacing: 0.2,
-  },
-  headerActions: { flexDirection: "row", alignItems: "center", gap: 10 },
-  iconButton: {
-    width: 38,
-    height: 38,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  profileButton: {
-    width: 38,
-    height: 38,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  searchBox: {
-    backgroundColor: "#E4ECE4",
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    height: 45,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
     marginBottom: 18,
   },
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: "800",
+    color: "#1A1A1A",
+    letterSpacing: -0.3,
+  },
+  genderTabs: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  genderTab: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: "#E0E0E0",
+    backgroundColor: "transparent",
+  },
+  genderTabActive: {
+    backgroundColor: "#1A1A1A",
+    borderColor: "#1A1A1A",
+  },
+  genderTabText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#666666",
+  },
+  genderTabTextActive: {
+    color: "#FFFFFF",
+  },
+  categoriesRow: {
+    gap: 16,
+    paddingRight: 24,
+  },
+  categoryItem: {
+    alignItems: "center",
+    width: 68,
+  },
+  categoryCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "#F5F0EB",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+    overflow: "hidden",
+  },
+  categoryCircleActive: {
+    borderWidth: 2,
+    borderColor: "#E8875C",
+  },
+  categoryCircleImage: {
+    width: "100%",
+    height: "100%",
+  },
+  categoryEmoji: {
+    fontSize: 26,
+  },
+  categoryLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#444444",
+    textAlign: "center",
+  },
+
+  /* ─── Featured Products ─── */
+  featuredSection: {
+    paddingHorizontal: 24,
+  },
+  featuredHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 16,
+  },
+  seeAllText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#E8875C",
+  },
+  productGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    rowGap: 16,
+    columnGap: 12,
+  },
+  productSlot: {
+    width: "48%",
+    minWidth: 150,
+  },
+  productCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    overflow: "hidden",
+    shadowColor: "rgba(0,0,0,0.06)",
+    shadowOpacity: 1,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  productImageWrap: {
+    position: "relative",
+    aspectRatio: 1,
+    backgroundColor: "#F5F2EE",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    overflow: "hidden",
+  },
+  productImage: {
+    width: "100%",
+    height: "100%",
+  },
+  heartBtn: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "rgba(255,255,255,0.85)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 5,
+    elevation: 5,
+  },
+  addCartBtn: {
+    position: "absolute",
+    right: 12,
+    bottom: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "#1A1A1A",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cartControls: {
+    position: "absolute",
+    right: 10,
+    bottom: 10,
+    height: 32,
+    minWidth: 80,
+    borderRadius: 16,
+    paddingHorizontal: 4,
+    backgroundColor: "#1A1A1A",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  cartQtyBtn: {
+    width: 26,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cartQtyBtnText: {
+    color: "#FFFFFF",
+    fontSize: 20,
+    lineHeight: 22,
+    fontWeight: "700",
+  },
+  cartQtyValue: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "900",
+    minWidth: 14,
+    textAlign: "center",
+  },
+  productInfo: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  productName: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#1A1A1A",
+    marginBottom: 4,
+  },
+  productPrice: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#1A1A1A",
+  },
+  colorSwatchRow: {
+    flexDirection: "row",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingBottom: 12,
+    paddingTop: 2,
+  },
+  colorSwatch: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.15)",
+  },
+  colorSwatchActive: {
+    borderWidth: 2,
+    borderColor: "#E8875C",
+  },
+
+  /* ─── Search Modal ─── */
   searchScreen: {
     flex: 1,
     backgroundColor: "#FFFFFF",
   },
-  searchScreenHeader: {
-    height: 64,
-    paddingHorizontal: 16,
+  searchScreenTopBar: {
     flexDirection: "row",
     alignItems: "center",
-    borderBottomWidth: 1,
-    borderBottomColor: "#E5E8E4",
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
   },
   searchScreenClose: {
     width: 40,
@@ -1307,781 +2019,243 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  searchScreenTitle: {
+  searchScreenInputWrap: {
     flex: 1,
-    color: "#17211D",
-    fontSize: 20,
-    fontWeight: "800",
-    textAlign: "center",
-  },
-  searchScreenHeaderAction: {
-    width: 40,
-  },
-  searchScreenInputRow: {
-    marginHorizontal: 20,
-    marginTop: 16,
-    marginBottom: 8,
-    minHeight: 52,
-    paddingHorizontal: 14,
-    borderRadius: 14,
-    backgroundColor: "#F4F4ED",
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 8,
+    backgroundColor: "#F4F4F0",
+    borderRadius: 100,
+    paddingHorizontal: 14,
+    height: 44,
   },
   searchScreenInput: {
     flex: 1,
-    color: "#17211D",
+    color: "#1A1A1A",
     fontSize: 16,
-    fontWeight: "600",
+    fontWeight: "500",
   },
-  searchScreenClear: {
-    width: 32,
-    height: 32,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  recentSearchesContent: {
-    flex: 1,
+  searchScreenScrollContent: {
     paddingHorizontal: 20,
-    paddingTop: 24,
+    paddingTop: 16,
+    paddingBottom: 40,
+  },
+  recentSearchesHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
   },
   recentSearchesTitle: {
-    color: "#748078",
+    color: "#999",
     fontSize: 12,
     fontWeight: "800",
     letterSpacing: 1,
     textTransform: "uppercase",
     marginBottom: 8,
   },
+  searchEditLink: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#E8875C",
+  },
   noRecentSearches: {
-    color: "#748078",
+    color: "#999",
     fontSize: 15,
     fontWeight: "600",
     marginTop: 12,
   },
-  recentSearchesList: {
-    gap: 2,
-    paddingBottom: 24,
+  recentSearchesRow: {
+    gap: 14,
+    paddingBottom: 6,
   },
-  recentSearchItem: {
-    minHeight: 52,
-    flexDirection: "row",
+  recentSearchChip: {
     alignItems: "center",
-    gap: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: "#E5E8E4",
+    width: 76,
   },
-  recentSearchText: {
-    flex: 1,
-    color: "#17211D",
-    fontSize: 15,
-    fontWeight: "600",
+  recentSearchChipIcon: {
+    width: 68,
+    height: 68,
+    borderRadius: 14,
+    backgroundColor: "#F4F4F0",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 6,
   },
-  stickySearchAndCategories: {
-    backgroundColor: "rgba(244, 244, 237, 0)",
-    marginHorizontal: -20,
-    paddingHorizontal: 20,
-    paddingTop: 4,
-    paddingBottom: 2,
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(23, 33, 29, 0)",
-  },
-  stickySearchAndCategoriesVisible: {
-    backgroundColor: "rgba(244, 244, 237, 0.58)",
-    borderBottomColor: "rgba(23, 33, 29, 0.08)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.35)",
-    shadowColor: "rgba(23, 33, 29, 0.12)",
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
-  },
-  categorySection: {
-    paddingBottom: 0,
-  },
-  searchInput: { flex: 1, color: "#17211D", fontSize: 14 },
-searchPromptBar: {
-  backgroundColor: "#FFFFFF",
-  borderRadius: 100,
-  paddingHorizontal: 16,
-  height: 52,
-  flexDirection: "row",
-  alignItems: "center",
-  gap: 10,
-  marginTop: 2,
-  shadowColor: "rgba(23, 33, 29, 0.15)",
-  shadowOpacity: 1,
-  shadowRadius: 10,
-  shadowOffset: { width: 0, height: 4 },
-  elevation: 2,
-},
-  promptInput: {
-  flex: 1,
-  color: "#17211D",
-  fontSize: 15,
-  fontWeight: "500",
-},
-  searchDivider: {
-  width: 1,
-  height: 22,
-  backgroundColor: "#E2E5E0",
-},
-voiceButton: {
-  width: 34,
-  height: 34,
-  alignItems: "center",
-  justifyContent: "center",
-},
-  heroGifWrap: {
-    marginTop: 4,
-    marginBottom: 20,
-    borderRadius: 24,
-    overflow: "hidden",
-    height: 220,
-  },
-  heroGif: {
-    width: "100%",
-    height: "100%",
-  },
-  sectionHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "baseline",
-    marginBottom: 14,
-  },
-  sectionTitle: {
-    color: "#17211D",
-    fontSize: 18,
-    fontWeight: "800",
-    letterSpacing: -0.3,
-  },
-  seeAll: {
-    color: "#6E786F",
+  recentSearchChipLabel: {
     fontSize: 11,
-    textTransform: "uppercase",
-    letterSpacing: 1,
-  },
-  categoryRow: { gap: 10, paddingBottom: 6, paddingTop: 4 },
-  categoryChip: {
-  backgroundColor: "transparent",
-  paddingHorizontal: 14,
-  paddingVertical: 8,
-  minWidth: 76,
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 6,
-},
-categoryChipActive: { backgroundColor: "transparent" },
-  categoryChipImage: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-  },
-  categoryEmoji: {
-    fontSize: 24,
-    lineHeight: 24,
-  },
-  categoryText: {
-  fontSize: 13,
-  color: "#17211D",
-  fontWeight: "700",
-  letterSpacing: 0,
-  textTransform: "none",
-},
-categoryTextActive: { color: "#000000", fontWeight: "800" },
-  categoryDivider: {
-    height: 1,
-    backgroundColor: "rgba(23, 33, 29, 0.08)",
-    marginTop: 3,
-  },
-  shopNowWrap: {
-    marginBottom: 28,
-  },
-  shopNowHeader: {
-    marginBottom: 12,
-  },
-  shopNowRow: {
-    flexDirection: "row",
-    gap: 12,
-  },
-  inspoCard: {
-    flex: 1,
-    backgroundColor: "#ffffff",
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#E5E8E4",
-    overflow: "hidden",
-    padding: 6,
-  },
-  inspoCardCenter: {
-    transform: [{ translateY: 10 }],
-  },
-  inspoImageWrap: {
-    position: "relative",
-    aspectRatio: 1,
-    backgroundColor: "#E9ECE8",
-  },
-  inspoImageBox: {
-    width: "100%",
-    height: "100%",
-    borderRadius: 14,
-    overflow: "hidden",
-    backgroundColor: "#F0F0EE",
-  },
-  inspoImage: {
-    width: "100%",
-    height: "100%",
-  },
-  inspoSave: {
-    position: "absolute",
-    top: 10,
-    right: 10,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,0.8)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  inspoCart: {
-    position: "absolute",
-    right: 10,
-    bottom: 10,
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: "#17211D",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  inspoCartControls: {
-    position: "absolute",
-    right: 10,
-    bottom: 10,
-    height: 30,
-    minWidth: 72,
-    borderRadius: 15,
-    paddingHorizontal: 3,
-    backgroundColor: "#17211D",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  inspoQuantityButton: {
-    width: 25,
-    height: 26,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  inspoQuantityText: {
-    color: "#FFFFFF",
-    fontSize: 20,
-    lineHeight: 22,
-    fontWeight: "700",
-  },
-  inspoQuantityValue: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "900",
-    minWidth: 14,
+    fontWeight: "600",
+    color: "#1A1A1A",
     textAlign: "center",
   },
-  inspoMeta: {
-    paddingHorizontal: 10,
-    paddingTop: 10,
-    paddingBottom: 12,
+  recommendedSection: {
+    marginTop: 28,
+    backgroundColor: "#FEF0E6",
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
+    marginHorizontal: -4,
   },
-  inspoBrand: {
-    color: "#748078",
-    fontSize: 9,
-    fontWeight: "700",
-    letterSpacing: 1.5,
-    textTransform: "uppercase",
+  recommendedGrid: {
+    flexDirection: "row",
+    gap: 12,
+    marginTop: 12,
   },
-  inspoName: {
-    color: "#17211D",
+  recommendedCard: {
+    flex: 1,
+    alignItems: "center",
+    backgroundColor: "#FFFFFF",
+    borderRadius: 16,
+    paddingVertical: 14,
+  },
+  recommendedImageBox: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: "#F5F0EB",
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    marginBottom: 8,
+  },
+  recommendedImage: {
+    width: "100%",
+    height: "100%",
+  },
+  recommendedLabel: {
     fontSize: 12,
     fontWeight: "700",
-    marginTop: 4,
+    color: "#1A1A1A",
   },
-  inspoPrice: {
-    color: "#17211D",
-    fontSize: 14,
-    fontWeight: "800",
-    marginTop: 8,
+  trendingSection: {
+    marginTop: 28,
   },
-  inspoDescription: {
-    color: "#5B665F",
-    fontSize: 10,
-    lineHeight: 15,
-    marginTop: 8,
-  },
-  productDescription: {
-    color: "#5B665F",
-    fontSize: 10,
-    lineHeight: 15,
-    marginTop: 8,
-  },
-  productParameters: {
-    color: "#526057",
-    fontSize: 9,
-    lineHeight: 14,
-    marginTop: 7,
-  },
-  inspoDetailsRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginTop: 8,
-  },
-  inspoDetailsRowTight: {
-    marginTop: 4,
-  },
-  inspoDetailLabel: {
-    color: "#748078",
-    fontSize: 9,
-    fontWeight: "700",
-    letterSpacing: 1.2,
-    textTransform: "uppercase",
-  },
-  inspoDetailValue: {
-    color: "#17211D",
-    fontSize: 10,
-    fontWeight: "700",
-  },
-  brandGallery: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
+  trendingRow: {
     gap: 12,
-    marginBottom: 30,
+    marginTop: 12,
+    paddingBottom: 6,
   },
-  brandSection: {
-    backgroundColor: "#F5EDE4",
-    marginHorizontal: -20,
-    paddingHorizontal: 20,
-    paddingVertical: 30,
+  trendingCard: {
+    width: 130,
   },
-  brandColumn: {
-    flex: 1,
-    gap: 12,
-  },
-  brandCard: {
-    position: "relative",
+  trendingImage: {
+    width: 130,
+    height: 130,
     borderRadius: 16,
-    overflow: "hidden",
-    backgroundColor: "#D9D9D9",
-    borderWidth: 1,
-    borderColor: "#E5E8E4",
-    width: "100%",
+    backgroundColor: "#F4F4F0",
+    marginBottom: 8,
   },
-  brandImage: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "cover",
+  trendingLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#1A1A1A",
   },
-  brandGradient: {
-    ...StyleSheet.absoluteFill,
+  forYouSection: {
+    paddingHorizontal: 24,
+    marginBottom: 28,
   },
-  brandTitle: {
-    position: "absolute",
-    bottom: 14,
-    left: 14,
-    color: "#FFFFFF",
-    fontSize: 18,
-    fontWeight: "800",
-    letterSpacing: -0.4,
-    textShadowColor: "rgba(0,0,0,0.6)",
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 6,
+  forYouRow: {
+    gap: 14,
+    paddingRight: 24,
   },
-  productsHeader: { marginBottom: 16 },
-  countText: { color: "#8A948C", fontSize: 10, letterSpacing: 1.2 },
-  productGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    columnGap: 10,
-    rowGap: 20,
+  forYouCard: {
+    width: 140,
   },
-  imageBanner: {
-    height: 360,
-    borderRadius: 44,
-    overflow: "hidden",
-    position: "relative",
-    marginBottom: 30,
-    backgroundColor: "transparent",
-  },
-  imageBannerPhoto: {
-    ...StyleSheet.absoluteFill,
-    width: "100%",
-    height: "100%",
-  },
-  productSlot: { width: "48%", minWidth: 150 },
-  productCard: {
-    width: "100%",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#E5E8E4",
-    overflow: "hidden",
-    padding: 6,
-  },
-  productImageWrap: {
+  forYouImageWrap: {
     position: "relative",
     aspectRatio: 1,
-    backgroundColor: "#E9ECE8",
-    borderRadius: 14,
+    backgroundColor: "#F5F2EE",
+    borderRadius: 18,
     overflow: "hidden",
   },
-  productImage: { width: "100%", height: "100%" },
-  productInfo: {
-    paddingHorizontal: 10,
-    paddingTop: 10,
-    paddingBottom: 12,
-  },
-  badge: {
-    position: "absolute",
-    top: 10,
-    left: 10,
-    backgroundColor: "#C94B3C",
-    color: "#FFFFFF",
-    fontSize: 9,
-    fontWeight: "800",
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    textTransform: "uppercase",
-    letterSpacing: 0.7,
-  },
-  badgeNew: {
-    position: "absolute",
-    top: 10,
-    left: 10,
-    backgroundColor: "#C94B3C",
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    borderRadius: 4,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-  },
-  badgeBestSeller: {
-    position: "absolute",
-    top: 10,
-    left: 10,
-    backgroundColor: "#8F2F27",
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    borderRadius: 4,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-  },
-  badgeText: {
-    color: "#FFFFFF",
-    fontSize: 9,
-    fontWeight: "900",
-    letterSpacing: 0.8,
-  },
-  interstitial: {
+  forYouImage: {
     width: "100%",
-    minHeight: 112,
-    borderRadius: 4,
-    padding: 18,
-    justifyContent: "center",
-    marginTop: 2,
+    height: "100%",
   },
-  interstitialBanner: {
-    width: "100%",
-    height: 160,
-    borderRadius: 16,
-    marginTop: 2,
-    overflow: "hidden",
-  },
-  interstitialKicker: {
-    color: "#FFFFFF",
-    fontSize: 9,
-    letterSpacing: 1.8,
-    fontWeight: "900",
-  },
-  interstitialTitle: {
-    fontSize: 24,
-    lineHeight: 30,
-    fontWeight: "900",
-    letterSpacing: -0.5,
-    marginTop: 6,
-  },
-  interstitialDetail: {
-    color: "#FFFFFF",
-    fontSize: 12,
+  forYouName: {
+    fontSize: 13,
     fontWeight: "700",
-    marginTop: 6,
-  },
-  saveButton: {
-    position: "absolute",
-    top: 10,
-    right: 10,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,0.8)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  productBrand: {
-    color: "#748078",
-    fontSize: 9,
-    letterSpacing: 1.2,
-    textTransform: "uppercase",
-    fontWeight: "700",
-  },
-  productName: {
-    color: "#17211D",
-    fontSize: 12,
-    fontWeight: "700",
-    marginTop: 4,
-  },
-  productPrice: {
-    color: "#17211D",
-    fontSize: 14,
-    fontWeight: "800",
+    color: "#1A1A1A",
     marginTop: 8,
   },
-  addCardButton: {
-    height: 34,
-    borderRadius: 3,
-    backgroundColor: "#17211D",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    marginTop: 12,
-    marginBottom: 2,
-  },
-  addCardText: {
-    color: "#F4F4ED",
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 1.2,
-  },
-  coupon: {
-    position: "absolute",
-    right: 16,
-    bottom: 100,
-    width: 245,
-    backgroundColor: "#17211D",
-    padding: 18,
-    borderRadius: 5,
-    shadowColor: "#000000",
-    shadowOpacity: 0.2,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-  couponClose: {
-    position: "absolute",
-    top: 8,
-    right: 10,
-    width: 24,
-    height: 24,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  couponCloseText: { color: "#F4F4ED", fontSize: 22, lineHeight: 24 },
-  couponKicker: {
-    color: "#C8FF00",
-    fontSize: 9,
-    letterSpacing: 1.5,
-    fontWeight: "900",
-  },
-  couponTitle: {
-    color: "#F4F4ED",
-    fontSize: 23,
-    lineHeight: 25,
-    fontWeight: "900",
-    marginTop: 10,
-  },
-  couponText: { color: "#C8D2C7", fontSize: 12, lineHeight: 17, marginTop: 9 },
-  couponCode: {
-    marginTop: 14,
-    backgroundColor: "#F4F4ED",
-    borderRadius: 3,
-    paddingHorizontal: 11,
-    paddingVertical: 9,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  couponCodeText: {
-    color: "#17211D",
+  forYouPrice: {
     fontSize: 14,
-    fontWeight: "900",
-    letterSpacing: 1.5,
+    fontWeight: "800",
+    color: "#1A1A1A",
+    marginTop: 2,
   },
-  couponCopy: {
-    color: "#B84A36",
-    fontSize: 9,
-    fontWeight: "900",
-    letterSpacing: 1.2,
+  secondaryBannerWrap: {
+    marginHorizontal: 24,
+    marginBottom: 28,
   },
-
-searchBackButton: {
-  width: 34,
-  height: 34,
+  secondaryBannerCard: {
+    width: "100%",
+    height: 140,
+    borderRadius: 20,
+    overflow: "hidden",
+    flexDirection: "row",
+    position: "relative",
+  },
+  secondaryBannerTextArea: {
+    flex: 1,
+    padding: 18,
+    justifyContent: "center",
+    zIndex: 2,
+  },
+  secondaryBannerTitle: {
+    color: "#FFFFFF",
+    fontSize: 17,
+    fontWeight: "800",
+    letterSpacing: -0.2,
+    lineHeight: 21,
+    marginBottom: 8,
+  },
+  secondaryBannerImage: {
+    width: "40%",
+    height: "100%",
+    position: "absolute",
+    right: 0,
+    bottom: 0,
+  },
+    notifBadge: {
+  position: "absolute",
+  top: 6,
+  right: 6,
+  minWidth: 17,
+  height: 17,
+  borderRadius: 8.5,
+  backgroundColor: "#E85D4A",
   alignItems: "center",
   justifyContent: "center",
-},
-searchScreenInputWrap: {
-  flex: 1,
-  flexDirection: "row",
-  alignItems: "center",
-  gap: 8,
-  backgroundColor: "#F1F3EF",
-  borderRadius: 100,
-  paddingHorizontal: 14,
-  height: 40,
+  paddingHorizontal: 3,
+  borderWidth: 2,
+  borderColor: "#FFFFFF",
 },
 
-searchScreenBody: {
-  flex: 1,
-  paddingHorizontal: 20,
-  paddingTop: 8,
-},
-searchScreenSectionLabel: {
-  fontSize: 11,
+notifBadgeText: {
+  color: "#FFFFFF",
+  fontSize: 8,
+  lineHeight: 10,
   fontWeight: "800",
-  letterSpacing: 1,
-  textTransform: "uppercase",
-  color: "#8A948C",
-  marginBottom: 10,
-},
-searchScreenEmpty: {
-  paddingVertical: 40,
-  alignItems: "center",
-},
-searchScreenEmptyText: {
-  fontSize: 13,
-  color: "#8A948C",
-  fontWeight: "600",
-},
-recentSearchRow: {
-  flexDirection: "row",
-  alignItems: "center",
-  gap: 10,
-  paddingVertical: 12,
-  borderBottomWidth: 1,
-  borderBottomColor: "#F0F0EE",
-},
-searchScreenTopBar: {
-  flexDirection: "row",
-  alignItems: "center",
-  gap: 10,
-  paddingHorizontal: 16,
-  paddingVertical: 10,
-},
-searchScreenScrollContent: {
-  paddingHorizontal: 20,
-  paddingTop: 16,
-  paddingBottom: 40,
-},
-recentSearchesHeaderRow: {
-  flexDirection: "row",
-  justifyContent: "space-between",
-  alignItems: "center",
-  marginBottom: 12,
-},
-
-searchEditLink: {
-  fontSize: 14,
-  fontWeight: "700",
-  color: "#2E6BE6",
-},
-
-recentSearchesRow: {
-  gap: 14,
-  paddingBottom: 6,
-},
-recentSearchChip: {
-  alignItems: "center",
-  width: 76,
-},
-recentSearchChipIcon: {
-  width: 68,
-  height: 68,
-  borderRadius: 14,
-  backgroundColor: "#F1F3EF",
-  alignItems: "center",
-  justifyContent: "center",
-  marginBottom: 6,
-},
-recentSearchChipLabel: {
-  fontSize: 11,
-  fontWeight: "600",
-  color: "#17211D",
   textAlign: "center",
 },
-recommendedSection: {
-  marginTop: 28,
-  backgroundColor: "#EAF2FB",
-  borderRadius: 20,
-  paddingHorizontal: 16,
-  paddingVertical: 18,
-  marginHorizontal: -4,
-},
-recommendedGrid: {
-  flexDirection: "row",
-  gap: 12,
-  marginTop: 12,
-},
-recommendedCard: {
-  flex: 1,
-  alignItems: "center",
-  backgroundColor: "#F5F6F3",
-  borderRadius: 16,
-  paddingVertical: 14,
-},
-recommendedImageBox: {
-  width: 56,
-  height: 56,
-  borderRadius: 28,
-  backgroundColor: "#FFFFFF",
-  alignItems: "center",
-  justifyContent: "center",
-  overflow: "hidden",
-  marginBottom: 8,
-},
-recommendedImage: {
+  catBarRow: { paddingHorizontal: 24, gap: 22, alignItems: "center" },
+  catBarItem: { height: 40, justifyContent: "center" },
+  catBarText: { fontSize: 13, fontWeight: "600", color: "#8A8A8A" },
+  catBarTextActive: { color: "#1A1A1A", fontWeight: "800" },
+  catBarUnderline: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 2,
+    backgroundColor: "#E8875C",
+    borderRadius: 1,
+  },
+  catBar: {
   width: "100%",
-  height: "100%",
+  paddingHorizontal: 16,
+  paddingVertical: 10,
+  backgroundColor: "transparent",
 },
-recommendedLabel: {
-  fontSize: 12,
-  fontWeight: "700",
-  color: "#17211D",
-},
-trendingSection: {
-  marginTop: 28,
-},
-trendingRow: {
-  gap: 12,
-  marginTop: 12,
-  paddingBottom: 6,
-},
-trendingCard: {
-  width: 130,
-},
-trendingImage: {
-  width: 130,
-  height: 130,
-  borderRadius: 14,
-  backgroundColor: "#F0F0EE",
-  marginBottom: 8,
-},
-trendingLabel: {
-  fontSize: 12,
-  fontWeight: "700",
-  color: "#17211D",
-},
-
 });

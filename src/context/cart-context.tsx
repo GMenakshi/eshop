@@ -9,7 +9,7 @@ import {
 
 import { catalog } from "@/constants/catalog";
 import { useAuth } from "@/context/auth-context";
-import { api, type ApiCartItem, type ApiProduct } from "@/lib/api";
+import { api, type ApiCartItem, type ApiCartResponse, type ApiProduct } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
 
 type CartProduct = ApiProduct | (typeof catalog)[keyof typeof catalog];
@@ -36,14 +36,7 @@ const CartContext = createContext<CartContextValue | null>(null);
 const getName = (product: CartProduct) =>
   "title" in product ? product.title : product.name;
 
-function cartItemsFromResponse(response: {
-  cart?: {
-    items?: ApiCartItem[];
-    stores?: { store?: { _id?: string; storeName?: string }; items?: ApiCartItem[] }[];
-  };
-  data?: typeof response.cart;
-  cartItems?: ApiCartItem[];
-}) {
+function cartItemsFromResponse(response: ApiCartResponse) {
   const value = response.cart ?? response.data;
   if (Array.isArray(value)) return value;
 
@@ -72,7 +65,7 @@ export const cartItemStoreId = (item: CartItem): string =>
 
 export function CartProvider({ children }: PropsWithChildren) {
   const { token, signOut } = useAuth();
-  const { storeId } = useStore();
+  const { storeId, activeStore } = useStore();
   const [items, setItems] = useState<CartItem[]>([]);
   const [cartId, setCartId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true); 
@@ -81,6 +74,10 @@ export function CartProvider({ children }: PropsWithChildren) {
   itemsRef.current = items;
 
   useEffect(() => {
+    const mongoId = activeStore?.mongoId;
+    const inActiveStore = (item: { storeId?: string }) =>
+      !mongoId || !item.storeId || item.storeId === mongoId;
+
     if (!token || !storeId) {
       if (!token) {
         setItems([]);
@@ -100,7 +97,7 @@ export function CartProvider({ children }: PropsWithChildren) {
         const cartValue = response.cart ?? response.data;
         const cartObject =
           cartValue && !Array.isArray(cartValue) ? cartValue : undefined;
-        const remoteItems = cartItemsFromResponse(response);
+        const remoteItems = cartItemsFromResponse(response).filter(inActiveStore);
 
         const remoteIds = new Set(
           remoteItems.map(
@@ -111,18 +108,22 @@ export function CartProvider({ children }: PropsWithChildren) {
                 : (item.productId?._id ?? item.productId?.id)),
           ),
         );
-        const guestItems = itemsRef.current;
+        const guestItems: CartItem[] = [];
         for (const item of guestItems) {
           if ("_id" in item.product && !remoteIds.has(item.product._id)) {
             try {
-              const variantId =
-                "variantId" in item.product && item.product.variantId
-                  ? item.product.variantId
-                  : "variants" in item.product &&
-                    Array.isArray(item.product.variants) &&
-                    item.product.variants.length > 0
-                  ? item.product.variants[0]._id ?? item.product.variants[0].id
+                            const firstVariant =
+                "variants" in item.product && Array.isArray(item.product.variants)
+                  ? item.product.variants[0]
                   : undefined;
+
+              const variantId =
+                ("variantId" in item.product && item.product.variantId) ||
+                firstVariant?.sizeVariants?.[0]?._id ||
+                firstVariant?.sizeVariants?.[0]?.id ||
+                firstVariant?._id ||
+                firstVariant?.id ||
+                undefined;
               await api.addCart(token, item.product._id, item.quantity, {
                 variantId,
                 size: item.product.size,
@@ -149,7 +150,7 @@ export function CartProvider({ children }: PropsWithChildren) {
           hydratedCartValue && !Array.isArray(hydratedCartValue)
             ? hydratedCartValue
             : undefined;
-            const hydratedRemoteItems = cartItemsFromResponse(hydratedResponse);
+        const hydratedRemoteItems = cartItemsFromResponse(hydratedResponse).filter(inActiveStore);
          console.log("[Cart] hydrated items", hydratedRemoteItems.map(i => ({ name: i.name, storeName: i.storeName, storeId: i.storeId })));
         setCartId(
           hydratedResponse.cartId ??
@@ -247,22 +248,26 @@ return product
         setCartId(null);
         setLoading(false);
       });
-  }, [token, storeId, signOut]);
-
+  }, [token, storeId, activeStore?.mongoId, signOut]);
+  
   const addItem = async (product: CartProduct, quantity = 1) => {
     if (!token) {
       throw new Error("Please sign in to add products to your cart.");
     }
     if (token && "_id" in product) {
       try {
-        let variantId =
-          "variantId" in product && product.variantId
-            ? product.variantId
-            : "variants" in product &&
-              Array.isArray(product.variants) &&
-              product.variants.length > 0
-            ? product.variants[0]._id ?? product.variants[0].id
+               const firstVariant =
+          "variants" in product && Array.isArray(product.variants)
+            ? product.variants[0]
             : undefined;
+
+        let variantId =
+          ("variantId" in product && product.variantId) ||
+          firstVariant?.sizeVariants?.[0]?._id ||
+          firstVariant?.sizeVariants?.[0]?.id ||
+          firstVariant?._id ||
+          firstVariant?.id ||
+          undefined;
 
         if (!variantId && storeId) {
           try {
@@ -365,14 +370,18 @@ return product
       }
     } else if (token && amount > 0 && "_id" in item.product) {
       try {
-        const variantId =
-          "variantId" in item.product && item.product.variantId
-            ? item.product.variantId
-            : "variants" in item.product &&
-              Array.isArray(item.product.variants) &&
-              item.product.variants.length > 0
-            ? item.product.variants[0]._id ?? item.product.variants[0].id
+                const firstVariant =
+          "variants" in item.product && Array.isArray(item.product.variants)
+            ? item.product.variants[0]
             : undefined;
+
+        const variantId =
+          ("variantId" in item.product && item.product.variantId) ||
+          firstVariant?.sizeVariants?.[0]?._id ||
+          firstVariant?.sizeVariants?.[0]?.id ||
+          firstVariant?._id ||
+          firstVariant?.id ||
+          undefined;
 
         await api.addCart(token, item.product._id, amount, {
           variantId,

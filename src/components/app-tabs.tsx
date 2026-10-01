@@ -16,7 +16,6 @@ export default function AppTabs() {
       >
         <Tabs.Screen name="index" options={{ title: "Home" }} />
         <Tabs.Screen name="explore" options={{ title: "Categories" }} />
-        <Tabs.Screen name="cart" options={{ href: null }} />
         <Tabs.Screen name="orders" options={{ title: "Orders" }} />
         <Tabs.Screen name="profile" options={{ href: null }} />
       </Tabs>
@@ -32,7 +31,6 @@ const tabIcons = {
     android: "apps",
     web: "apps",
   },
-  cart: { ios: "bag.fill", android: "shopping_cart", web: "shopping_cart" },
   orders: {
     ios: "shippingbox.fill",
     android: "inventory",
@@ -44,8 +42,7 @@ function CustomTabBar({ state, navigation }: any) {
   const insets = useSafeAreaInsets();
   const { token } = useAuth();
   const visibleRoutes = state.routes.filter(
-    (route: { name: string }) =>
-      route.name !== "profile" && route.name !== "cart",
+    (route: { name: string }) => route.name !== "profile"
   );
 
   return (
@@ -121,6 +118,10 @@ function CustomTabBar({ state, navigation }: any) {
 
 const styles = StyleSheet.create({
 bottomArea: {
+  position: "absolute",
+  bottom: 0,
+  left: 0,
+  right: 0,
   flexDirection: "row",
   alignItems: "center",
   gap: 10,

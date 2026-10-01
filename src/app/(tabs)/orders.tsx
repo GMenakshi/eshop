@@ -1,6 +1,6 @@
 import { Image } from "expo-image";
-import { router } from "expo-router";
-import { useEffect, useState } from "react";
+import { router, useLocalSearchParams } from "expo-router";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 
 import { ProductRail } from "@/components/product-rail";
 import { ThemedText } from "@/components/themed-text";
@@ -18,11 +19,15 @@ import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
 
 const ink = "#17211D";
-const muted = "#748078";
-const surface = "#E8EFE7";
-const border = "#D7E0D6";
+const muted = "#9AA39B";
+const border = "#ECECE6";
+const orange = "#F2733B";
+const pillBg = "#F1F1EC";
 
 type OrderRecord = Record<string, unknown>;
+type Decision = "APPROVED" | "REJECTED";
+type StatusGroup = "PROCESSING" | "APPROVED" | "REJECTED" | "CANCELED";
+
 export type OrderLine = {
   title: string;
   image?: string;
@@ -34,6 +39,8 @@ export type OrderLine = {
   unit?: string;
   size?: string;
   weight?: string | number;
+  decision?: Decision;
+  remarks?: string;
 };
 export type OrderView = {
   id: string;
@@ -72,6 +79,20 @@ function textValue(value: unknown, fallback: string) {
   return typeof value === "string" || typeof value === "number"
     ? String(value)
     : fallback;
+}
+
+function readDecision(obj?: Record<string, unknown>): {
+  decision?: Decision;
+  remarks?: string;
+} {
+  if (!obj) return {};
+  const raw = String(
+    obj.approvalStatus ?? obj.decision ?? obj.status ?? "",
+  ).toUpperCase();
+  const decision =
+    raw === "APPROVED" || raw === "REJECTED" ? (raw as Decision) : undefined;
+  const remarks = textValue(obj.remarks ?? obj.remark, "");
+  return { decision, remarks: remarks || undefined };
 }
 
 function lineFromValue(
@@ -130,6 +151,7 @@ function lineFromValue(
       typeof item.weight === "string" || typeof item.weight === "number"
         ? item.weight
         : undefined,
+    ...readDecision(item),
   };
 }
 
@@ -140,11 +162,17 @@ function toOrderView(
 ): OrderView {
   const rawItems =
     record.items ?? record.products ?? record.orderItems ?? record.cartItems;
-  const lines = (
+  const rawLines = (
     Array.isArray(rawItems) ? rawItems : [record.product ?? rawItems]
   )
     .map((value) => lineFromValue(value, products))
     .filter((line): line is OrderLine => Boolean(line));
+  const orderDecision = readDecision(record);
+  const lines = rawLines.map((line) => ({
+    ...line,
+    decision: line.decision ?? orderDecision.decision,
+    remarks: line.remarks ?? orderDecision.remarks,
+  }));
   const dateValue = record.createdAt ?? record.orderDate ?? record.date;
   const date = dateValue
     ? new Date(String(dateValue))
@@ -234,13 +262,35 @@ function toOrderView(
   };
 }
 
+// Maps the raw backend order status into one of the three tabs shown in the UI.
+function statusGroup(status: string): StatusGroup {
+  const s = status.toUpperCase();
+  if (s === "APPROVED") return "APPROVED";
+  if (s === "REJECTED") return "REJECTED";
+  if (s === "CANCELLED" || s === "CANCELED") return "CANCELED";
+  return "PROCESSING";
+}
+
+const lineGroup = (order: OrderView, line: OrderLine): StatusGroup =>
+  line.decision ?? statusGroup(order.status);
+
+const TABS: { key: StatusGroup; label: string }[] = [
+  { key: "PROCESSING", label: "Processing" },
+  { key: "APPROVED", label: "Approved" },
+  { key: "REJECTED", label: "Rejected" },
+  { key: "CANCELED", label: "Canceled" },
+];
+
 export default function OrdersScreen() {
   const { token } = useAuth();
   const { storeId } = useStore();
+  const { id } = useLocalSearchParams<{ id?: string }>();
+
   const [orders, setOrders] = useState<OrderView[]>([]);
   const [products, setProducts] = useState<ApiProduct[]>([]);
   const [loading, setLoading] = useState(Boolean(token));
   const [error, setError] = useState("");
+  const [activeTab, setActiveTab] = useState<StatusGroup>("PROCESSING");
 
   const load = () => {
     if (!storeId) {
@@ -308,19 +358,70 @@ export default function OrdersScreen() {
 
   useEffect(load, [token, storeId]);
 
+  useEffect(() => {
+  if (!id || !orders.length) return;
+
+  const targetOrder = orders.find(
+    (order) =>
+      order.id === String(id) ||
+      order.orderNumber === String(id),
+  );
+
+  if (!targetOrder) return;
+
+  setActiveTab(statusGroup(targetOrder.status));
+}, [id, orders]);
+
+  const filteredOrders = useMemo(
+    () =>
+      orders
+        .map((order) => ({
+          ...order,
+          lines: order.lines.filter((l) => lineGroup(order, l) === activeTab),
+        }))
+        .filter((order) => order.lines.length > 0),
+    [orders, activeTab],
+  );
+
   return (
     <SafeAreaView style={styles.screen} edges={["top"]}>
+      <View style={styles.header}>
+        <Pressable
+          hitSlop={12}
+          onPress={() => router.back()}
+          style={styles.headerIconButton}
+        >
+          <Ionicons name="chevron-back" size={22} color={ink} />
+        </Pressable>
+        <ThemedText style={styles.headerTitle}>My Orders</ThemedText>
+        <Pressable hitSlop={12} style={styles.headerIconButton}>
+          <Ionicons name="search" size={20} color={ink} />
+        </Pressable>
+      </View>
+
+      <View style={styles.tabBar}>
+        {TABS.map((tab) => {
+          const isActive = tab.key === activeTab;
+          return (
+            <Pressable
+              key={tab.key}
+              onPress={() => setActiveTab(tab.key)}
+              style={[styles.tabPill, isActive && styles.tabPillActive]}
+            >
+              <ThemedText
+                style={[styles.tabLabel, isActive && styles.tabLabelActive]}
+              >
+                {tab.label}
+              </ThemedText>
+            </Pressable>
+          );
+        })}
+      </View>
+
       <ScrollView
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.header}>
-          <View>
-            <ThemedText style={styles.eyebrow}>ESHOP / HISTORY</ThemedText>
-            <ThemedText style={styles.heading}>Orders</ThemedText>
-          </View>
-          <ThemedText style={styles.count}>{orders.length} ORDERS</ThemedText>
-        </View>
         {!token && (
           <View style={styles.signInPanel}>
             <ThemedText style={styles.panelTitle}>
@@ -356,16 +457,18 @@ export default function OrdersScreen() {
             </Pressable>
           </View>
         )}
-        {!loading && !error && token && !orders.length && (
+        {!loading && !error && token && !filteredOrders.length && (
           <View style={styles.state}>
-            <ThemedText style={styles.panelTitle}>No orders yet</ThemedText>
+            <ThemedText style={styles.panelTitle}>
+              No {activeTab.toLowerCase()} orders
+            </ThemedText>
             <ThemedText style={styles.panelText}>
-              Your completed purchases will appear here.
+              Orders in this category will appear here.
             </ThemedText>
           </View>
         )}
         <View style={styles.orderList}>
-          {orders.map((order) => (
+          {filteredOrders.map((order) => (
             <OrderCard
               key={order.id}
               order={order}
@@ -373,405 +476,279 @@ export default function OrdersScreen() {
             />
           ))}
         </View>
-        <ProductRail title="For You" products={products} />
+        <ProductRail title="For You" products={products} showArrow={false} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function OrderCard({ order, onCancel }: { order: OrderView; onCancel: (id: string) => void }) {
-  const canCancel =
-    order.status === "PENDING" || order.status === "CONFIRMED";
-  const subtotalValue = order.subtotal ?? 0;
-  const taxValue = order.tax ?? 0;
-  const discountValue = order.discount ?? 0;
-  const deliveryFeeValue = order.deliveryFee ?? 0;
+function OrderCard({
+  order,
+  onCancel,
+}: {
+  order: OrderView;
+  onCancel: (id: string) => void;
+}) {
   return (
-    <View style={styles.orderCard}>
-      <View style={styles.orderHeader}>
-        <View>
-          <ThemedText style={styles.meta}>
-            {order.orderNumber || order.id} · {order.date}
-          </ThemedText>
-          <ThemedText style={styles.orderTitle}>
-            {order.lines.length} ITEM
-            {order.lines.length === 1 ? "" : "S"}
-          </ThemedText>
-        </View>
-        <ThemedText
-          style={[
-            styles.status,
-            order.status === "DELIVERED" && styles.delivered,
-            order.status === "CANCELLED" && styles.cancelled,
-          ]}
-        >
-          {order.status}
-        </ThemedText>
-      </View>
-
-      <View style={styles.lineItems}>
-        {order.lines.map((line, idx) => {
-          const lineImage = apiImageUrl(line.image);
-          return (
-            <View key={`${order.id}-line-${idx}`} style={styles.lineItem}>
-              <View style={styles.lineImageFrame}>
+    <View style={styles.orderList}>
+      {order.lines.map((line, idx) => {
+        const lineImage = apiImageUrl(line.image);
+        const group = lineGroup(order, line);
+        const canCancel = group === "PROCESSING";
+        return (
+          <View key={`${order.id}-line-${idx}`} style={styles.card}>
+            <View style={styles.cardRow}>
+              <View style={styles.thumbFrame}>
                 {lineImage ? (
                   <Image
                     source={{ uri: lineImage }}
-                    style={styles.lineImage}
+                    style={styles.thumb}
                     contentFit="cover"
                   />
                 ) : (
-                  <ThemedText style={styles.lineImagePlaceholder}>
-                    NO IMAGE
+                  <ThemedText style={styles.thumbPlaceholder}>—</ThemedText>
+                )}
+              </View>
+                            <View style={styles.cardBody}>
+                <ThemedText style={styles.cardTitle} numberOfLines={1}>
+                  {line.title}
+                  {line.quantity > 1 ? ` × ${line.quantity}` : ""}
+                </ThemedText>
+                <ThemedText style={styles.cardOrderId}>
+                  Order ID - {order.orderNumber || order.id}
+                </ThemedText>
+                {(line.size || line.weight || line.unit) && (
+                  <ThemedText style={styles.cardMeta}>
+                    {[line.size, line.weight, line.unit]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </ThemedText>
+                )}
+                {line.productCode && (
+                  <ThemedText style={styles.cardMeta}>
+                    Code: {line.productCode}
                   </ThemedText>
                 )}
               </View>
-              <View style={styles.lineDetails}>
-                <ThemedText style={styles.lineTitle} numberOfLines={2}>
-                  {line.title}
+              <View style={styles.cardPriceGroup}>
+                <ThemedText style={styles.cardPrice}>
+                  ₹{(line.price ?? 0).toFixed(2)}
                 </ThemedText>
-                {line.productCode ? (
-                  <ThemedText style={styles.lineMeta}>
-                    Code: {line.productCode}
+                {line.mrp !== undefined && line.mrp > (line.price ?? 0) && (
+                  <ThemedText style={styles.cardMrp}>
+                    ₹{line.mrp.toFixed(2)}
                   </ThemedText>
-                ) : null}
-                {line.unit ? (
-                  <ThemedText style={styles.lineMeta}>Unit: {line.unit}</ThemedText>
-                ) : null}
-                {line.size ? (
-                  <ThemedText style={styles.lineMeta}>Size: {line.size}</ThemedText>
-                ) : null}
-                {line.weight ? (
-                  <ThemedText style={styles.lineMeta}>
-                    Weight: {line.weight}
-                  </ThemedText>
-                ) : null}
-                <ThemedText style={styles.lineQty}>
-                  Qty: {line.quantity}
-                </ThemedText>
-              </View>
-              <View style={styles.linePricing}>
-                {line.mrp && line.mrp > (line.price ?? 0) ? (
-                  <ThemedText style={styles.lineMrp}>
-                    ₹{line.mrp}
-                  </ThemedText>
-                ) : null}
-                <ThemedText style={styles.linePrice}>
-                  ₹{line.price ?? 0}
-                </ThemedText>
+                )}
               </View>
             </View>
-          );
-        })}
-      </View>
 
-      {order.customerName || order.customerPhone ? (
-        <View style={styles.detailRow}>
-          <ThemedText style={styles.detailLabel}>Customer</ThemedText>
-          <ThemedText style={styles.detailValue}>
-            {order.customerName}
-            {order.customerName && order.customerPhone
-              ? ` · ${order.customerPhone}`
-              : order.customerPhone}
-          </ThemedText>
-        </View>
-      ) : null}
-      {order.paymentMethod ? (
-        <View style={styles.detailRow}>
-          <ThemedText style={styles.detailLabel}>Payment</ThemedText>
-          <ThemedText style={styles.detailValue}>
-            {order.paymentMethod}
-          </ThemedText>
-        </View>
-      ) : null}
-      {order.shippingAddress ? (
-        <View style={styles.detailRow}>
-          <ThemedText style={styles.detailLabel}>Shipping Address</ThemedText>
-          <ThemedText style={styles.detailValue}>
-            {order.shippingAddress}
-          </ThemedText>
-        </View>
-      ) : null}
-      {order.estimatedDelivery ? (
-        <View style={styles.detailRow}>
-          <ThemedText style={styles.detailLabel}>Estimated Delivery</ThemedText>
-          <ThemedText style={styles.detailValue}>
-            {order.estimatedDelivery}
-          </ThemedText>
-        </View>
-      ) : null}
-      {order.notes ? (
-        <View style={styles.detailRow}>
-          <ThemedText style={styles.detailLabel}>Notes</ThemedText>
-          <ThemedText style={styles.detailValue}>{order.notes}</ThemedText>
-        </View>
-      ) : null}
+            {(group === "APPROVED" || group === "REJECTED") && (
+              <View
+                style={[
+                  styles.remarksBox,
+                  group === "APPROVED"
+                    ? styles.remarksApproved
+                    : styles.remarksRejected,
+                ]}
+              >
+                <ThemedText
+                  style={[
+                    styles.remarksStatus,
+                    { color: group === "APPROVED" ? "#2E7D4F" : "#B84A36" },
+                  ]}
+                >
+                  {group === "APPROVED" ? "Approved" : "Rejected"}
+                </ThemedText>
+                <ThemedText style={styles.remarksText}>
+                  {line.remarks
+                    ? `Remarks: ${line.remarks}`
+                    : "No remarks provided."}
+                </ThemedText>
+              </View>
+            )}
 
-      <View style={styles.priceBreakdown}>
-        {order.subtotal !== undefined && (
-          <View style={styles.breakdownRow}>
-            <ThemedText style={styles.breakdownLabel}>Subtotal</ThemedText>
-            <ThemedText style={styles.breakdownValue}>
-              ₹{subtotalValue.toFixed(2)}
-            </ThemedText>
-          </View>
-        )}
-        {order.tax !== undefined && (
-          <View style={styles.breakdownRow}>
-            <ThemedText style={styles.breakdownLabel}>Tax</ThemedText>
-            <ThemedText style={styles.breakdownValue}>
-              ₹{taxValue.toFixed(2)}
-            </ThemedText>
-          </View>
-        )}
-        {order.discount !== undefined && (
-          <View style={styles.breakdownRow}>
-            <ThemedText style={styles.breakdownLabel}>Discount</ThemedText>
-            <ThemedText style={styles.breakdownValue}>
-              -₹{discountValue.toFixed(2)}
-            </ThemedText>
-          </View>
-        )}
-        {order.deliveryFee !== undefined && (
-          <View style={styles.breakdownRow}>
-            <ThemedText style={styles.breakdownLabel}>Delivery Fee</ThemedText>
-            <ThemedText style={styles.breakdownValue}>
-              ₹{deliveryFeeValue.toFixed(2)}
-            </ThemedText>
-          </View>
-        )}
-        <View style={[styles.breakdownRow, styles.breakdownTotal]}>
-          <ThemedText style={styles.breakdownTotalLabel}>Total</ThemedText>
-          <ThemedText style={styles.breakdownTotalValue}>
-            ₹{order.total.toFixed(2)}
-          </ThemedText>
-        </View>
-      </View>
+            {group === "PROCESSING" && (
+              <View style={styles.reviewRow}>
+                <ThemedText style={styles.reviewText}>
+                  We're getting your order ready.
+                </ThemedText>
+                {canCancel && (
+                  <Pressable
+                    style={styles.cancelButton}
+                    onPress={() => onCancel(order.id)}
+                  >
+                    <ThemedText style={styles.cancelButtonText}>
+                      Cancel Order
+                    </ThemedText>
+                  </Pressable>
+                )}
+              </View>
+            )}
 
-      {canCancel && (
-        <Pressable
-          accessibilityLabel="Cancel order"
-          onPress={() => onCancel(order.id)}
-          style={styles.cancelButton}
-        >
-          <ThemedText style={styles.cancelText}>CANCEL ORDER</ThemedText>
-        </Pressable>
-      )}
+            {group === "CANCELED" && (
+              <View style={styles.reviewRow}>
+                <ThemedText style={styles.reviewText}>
+                  This order was canceled.
+                </ThemedText>
+              </View>
+            )}
+          </View>
+        );
+      })}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#F4F4ED" },
-  content: { padding: 24, paddingBottom: 130 },
+  screen: { flex: 1, backgroundColor: "#FFFFFF" },
   header: {
     flexDirection: "row",
+    alignItems: "center",
     justifyContent: "space-between",
-    alignItems: "flex-end",
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    paddingBottom: 10,
   },
-  eyebrow: {
-    color: muted,
-    fontSize: 10,
-    letterSpacing: 1.8,
-    fontWeight: "800",
-    marginBottom: 12,
+  headerIconButton: {
+    width: 34,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  heading: {
+  headerTitle: {
     color: ink,
-    fontSize: 40,
-    lineHeight: 42,
-    fontWeight: "800",
-    letterSpacing: -1.2,
+    fontSize: 17,
+    fontWeight: "700",
   },
-  count: {
+  tabBar: {
+    flexDirection: "row",
+    backgroundColor: pillBg,
+    borderRadius: 24,
+    marginHorizontal: 16,
+    padding: 4,
+    gap: 4,
+  },
+  tabPill: {
+    flex: 1,
+    paddingVertical: 9,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  tabPillActive: {
+    backgroundColor: ink,
+  },
+  tabLabel: {
     color: muted,
-    fontSize: 10,
-    letterSpacing: 1.5,
-    fontWeight: "800",
-    marginBottom: 4,
+    fontSize: 12,
+    fontWeight: "700",
   },
-  orderList: { gap: 14, marginTop: 28 },
-  orderCard: {
+  tabLabelActive: {
+    color: "#FFFFFF",
+  },
+  content: { padding: 16, paddingBottom: 130 },
+  orderList: { gap: 12 },
+  card: {
     borderRadius: 14,
     borderWidth: 1,
     borderColor: border,
-    backgroundColor: surface,
-    padding: 14,
-    gap: 12,
-  },
-  orderHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: 8,
-  },
-  orderTitle: {
-    color: ink,
-    fontSize: 15,
-    fontWeight: "800",
-    marginTop: 2,
-  },
-  meta: {
-    color: muted,
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 1.2,
-  },
-  status: {
-    fontSize: 9,
-    fontWeight: "800",
-    letterSpacing: 1.2,
-    textTransform: "uppercase",
-    borderWidth: 1,
-    borderRadius: 3,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-  },
-  delivered: {
-    color: ink,
-    backgroundColor: "#D4E8D2",
-    borderColor: "#D4E8D2",
-  },
-  cancelled: {
-    color: "#FFFFFF",
-    backgroundColor: "#B84A36",
-    borderColor: "#B84A36",
-  },
-  lineItems: { gap: 10 },
-  lineItem: {
-    flexDirection: "row",
+    backgroundColor: "#FFFFFF",
+    padding: 12,
     gap: 10,
-    alignItems: "center",
   },
-  lineImageFrame: {
-    width: 64,
-    height: 64,
-    borderRadius: 6,
-    backgroundColor: "#E1E9E0",
+  cardRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  thumbFrame: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: pillBg,
     alignItems: "center",
     justifyContent: "center",
+    overflow: "hidden",
   },
-  lineImage: { width: "100%", height: "100%", borderRadius: 6 },
-  lineImagePlaceholder: {
-    color: muted,
-    fontSize: 7,
-    letterSpacing: 1,
-    fontWeight: "800",
-  },
-  lineDetails: {
-    flex: 1,
-    gap: 2,
-  },
-  lineTitle: {
+  thumb: { width: "100%", height: "100%" },
+  thumbPlaceholder: { color: muted, fontSize: 12 },
+  cardBody: { flex: 1, gap: 2 },
+  cardTitle: {
     color: ink,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "700",
-    lineHeight: 17,
   },
-  lineMeta: {
+  cardOrderId: {
     color: muted,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: "600",
   },
-  lineQty: {
+  cardPrice: {
     color: ink,
-    fontSize: 11,
+    fontSize: 14,
     fontWeight: "800",
-    marginTop: 2,
   },
-  linePricing: {
+  cardPriceGroup: {
     alignItems: "flex-end",
     gap: 2,
   },
-  linePrice: {
-    color: ink,
-    fontSize: 13,
-    fontWeight: "800",
-  },
-  lineMrp: {
+  cardMrp: {
     color: muted,
     fontSize: 11,
-    textDecorationLine: "line-through",
     fontWeight: "600",
+    textDecorationLine: "line-through",
   },
-  detailRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: "#E8E8E0",
-  },
-  detailLabel: {
+  cardMeta: {
     color: muted,
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 1,
+    fontSize: 11,
+    fontWeight: "500",
+    marginTop: 2,
   },
-  detailValue: {
-    color: ink,
-    fontSize: 12,
-    fontWeight: "700",
-    maxWidth: "60%",
-    textAlign: "right",
+  reviewRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
   },
-  priceBreakdown: {
-    backgroundColor: "#FFFFFF",
+  reviewText: {
+    flex: 1,
+    color: muted,
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: "500",
+  },
+  reviewButton: {
+    backgroundColor: orange,
     borderRadius: 8,
-    padding: 10,
-    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
   },
-  breakdownRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  breakdownLabel: {
-    color: muted,
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  breakdownValue: {
-    color: ink,
+  reviewButtonText: {
+    color: "#FFFFFF",
     fontSize: 11,
     fontWeight: "800",
-  },
-  breakdownTotal: {
-    borderTopWidth: 1,
-    borderTopColor: "#E8E8E0",
-    paddingTop: 8,
-    marginTop: 4,
-  },
-  breakdownTotalLabel: {
-    color: ink,
-    fontSize: 12,
-    fontWeight: "900",
-  },
-  breakdownTotalValue: {
-    color: ink,
-    fontSize: 14,
-    fontWeight: "900",
   },
   cancelButton: {
-    alignSelf: "stretch",
     backgroundColor: "#B84A36",
-    borderRadius: 3,
+    borderRadius: 8,
+    paddingHorizontal: 16,
     paddingVertical: 10,
-    alignItems: "center",
-    justifyContent: "center",
   },
-  cancelText: {
-    color: "#F4F4ED",
-    fontSize: 10,
-    fontWeight: "900",
-    letterSpacing: 1.5,
+  cancelButtonText: {
+    color: "#FFFFFF",
+    fontSize: 11,
+    fontWeight: "800",
   },
+  remarksBox: { borderRadius: 10, padding: 10, gap: 3 },
+  remarksApproved: { backgroundColor: "#E9F5EE" },
+  remarksRejected: { backgroundColor: "#FBEAE6" },
+  remarksStatus: { fontSize: 12, fontWeight: "800" },
+  remarksText: { color: ink, fontSize: 12, lineHeight: 17, fontWeight: "500" },
   signInPanel: {
-    backgroundColor: surface,
+    backgroundColor: pillBg,
     borderRadius: 14,
     padding: 20,
-    marginTop: 28,
+    marginTop: 12,
   },
   panelTitle: { color: ink, fontSize: 18, fontWeight: "800" },
   panelText: { color: muted, fontSize: 14, lineHeight: 21, marginTop: 7 },

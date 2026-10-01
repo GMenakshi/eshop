@@ -7,14 +7,17 @@ import {
   useState,
   type PropsWithChildren,
 } from "react";
+import { unregisterPush } from "@/lib/push";
 
 import { api, type ApiUser } from "@/lib/api";
+import { getSavedAddresses } from "@/lib/addressStorage";
 
 type AuthContextValue = {
   token: string | null;
   user: ApiUser | null;
+  ready: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signOut: () => void;
+  signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
 };
 
@@ -25,40 +28,33 @@ const AUTH_USER_KEY = "authUser";
 export function AuthProvider({ children }: PropsWithChildren) {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<ApiUser | null>(null);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     let active = true;
-    void Promise.all([
-      AsyncStorage.getItem(AUTH_TOKEN_KEY),
-      AsyncStorage.getItem(AUTH_USER_KEY),
-    ]).then(([savedToken, savedUser]) => {
-      if (!active) return;
-      setToken(savedToken);
-      if (savedUser) {
-        try {
-          setUser(JSON.parse(savedUser) as ApiUser);
-        } catch {
-          void AsyncStorage.removeItem(AUTH_USER_KEY);
+    (async () => {
+      try {
+        const [savedToken, savedUser] = await Promise.all([
+          AsyncStorage.getItem(AUTH_TOKEN_KEY),
+          AsyncStorage.getItem(AUTH_USER_KEY),
+        ]);
+        if (!active) return;
+        setToken(savedToken);
+        if (savedUser) {
+          try {
+            setUser(JSON.parse(savedUser) as ApiUser);
+          } catch {
+            void AsyncStorage.removeItem(AUTH_USER_KEY);
+          }
         }
+      } finally {
+        if (active) setReady(true);
       }
-    });
+    })();
     return () => {
       active = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (!token) return;
-    const timeout = setTimeout(
-      () => {
-        setToken(null);
-        setUser(null);
-        void AsyncStorage.multiRemove([AUTH_TOKEN_KEY, AUTH_USER_KEY]);
-      },
-      30 * 60 * 1000,
-    );
-    return () => clearTimeout(timeout);
-  }, [token]);
 
   const signIn = useCallback(async (email: string, password: string) => {
     const response = await api.signIn(email, password);
@@ -86,35 +82,51 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const refreshUser = useCallback(async () => {
     if (!token) return;
-    const response = await api.dashboard(token);
-    const payload = (response.user ?? response.data ?? {}) as Partial<ApiUser>;
-    const normalizedUser: ApiUser = {
-      _id: payload._id ?? payload.id,
-      id: payload.id ?? payload._id,
-      name: payload.name,
-      first_name: payload.first_name,
-      last_name: payload.last_name,
-      email: payload.email ?? "",
-      role: payload.role,
-      phone: payload.phone,
-      isActive: payload.isActive,
-      address: payload.address,
-    };
-    setUser(normalizedUser);
-    await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(normalizedUser));
+    try {
+      const response = await api.dashboard(token);
+      const payload = (response.user ?? response.data ?? {}) as Partial<ApiUser>;
+      const userId = payload._id ?? payload.id;
+
+      let userAddress = payload.address;
+      if (!userAddress && userId) {
+        const local = await getSavedAddresses(userId);
+        if (local.length > 0) {
+          userAddress = local[0];
+        }
+      }
+
+      const normalizedUser: ApiUser = {
+        _id: userId,
+        id: payload.id ?? payload._id,
+        name: payload.name,
+        first_name: payload.first_name,
+        last_name: payload.last_name,
+        email: payload.email ?? "",
+        role: payload.role,
+        phone: payload.phone,
+        isActive: payload.isActive,
+        address: userAddress,
+      };
+      setUser(normalizedUser);
+      await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(normalizedUser));
+    } catch (err) {
+      console.warn("[Auth] refreshUser warning:", err);
+    }
   }, [token]);
 
-  const signOut = useCallback(() => {
-    setToken(null);
-    setUser(null);
-    void AsyncStorage.multiRemove([AUTH_TOKEN_KEY, AUTH_USER_KEY]);
-  }, []);
+  const signOut = useCallback(async () => {
+  if (token) await unregisterPush(token); // must run before the token is cleared
+  setToken(null);
+  setUser(null);
+  await AsyncStorage.multiRemove([AUTH_TOKEN_KEY, AUTH_USER_KEY]);
+}, [token]);
 
   return (
     <AuthContext.Provider
       value={{
         token,
         user,
+        ready,
         signIn,
         signOut,
         refreshUser,

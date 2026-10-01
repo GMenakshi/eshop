@@ -2,7 +2,7 @@ const resolveApiBaseUrl = () => {
   const configured = process.env.EXPO_PUBLIC_API_BASE_URL;
   if (configured) return configured.replace(/\/+$/, "");
 
-  return "https://store-product-backend.onrender.com/api";
+  return "https://estorebackend.amptechnology.in/api";
 };
 
 const API_BASE_URL = resolveApiBaseUrl();
@@ -17,24 +17,6 @@ class ApiRequestError extends Error {
   }
 }
 
-const resolveDefaultStoreId = () => {
-  const explicit = process.env.EXPO_PUBLIC_DEFAULT_STORE_ID;
-  if (explicit?.trim()) return explicit.trim();
-
-  const storeBaseUrl = process.env.EXPO_PUBLIC_STORE_BASE_URL;
-  const matchFromStoreBase = storeBaseUrl?.match(
-    /\/product\/store\/([^/?#]+)/i,
-  );
-  if (matchFromStoreBase?.[1]) return decodeURIComponent(matchFromStoreBase[1]);
-
-  const apiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL;
-  const matchFromApiBase = apiBaseUrl?.match(/\/product\/store\/([^/?#]+)/i);
-  if (matchFromApiBase?.[1]) return decodeURIComponent(matchFromApiBase[1]);
-
-  return "STR-1789629549831";
-};
-
-export const DEFAULT_STORE_ID = resolveDefaultStoreId();
 const storeProductsUrl = (storeId: string) =>
   `${API_BASE_URL}/product/store/${encodeURIComponent(storeId)}`;
 
@@ -61,9 +43,25 @@ export type ApiUser = {
   address?: ApiAddress;
 };
 
+export type ApiSizeVariant = {
+  _id?: string;
+  id?: string;
+  size?: string;
+  weight?: string;
+  height?: string;
+  mrp?: number;
+  offerPrice?: number;
+  openingStock?: number;
+  currentStock?: number;
+  stock?: number;
+  sku?: string | null;
+  isActive?: boolean;
+};
+
 export type ApiVariant = {
   _id?: string;
   id?: string;
+  color?: string;
   size?: string;
   weight?: string;
   mrp?: number;
@@ -71,7 +69,10 @@ export type ApiVariant = {
   stock?: number;
   sku?: string;
   isActive?: boolean;
+  images?: string[];
+  sizeVariants?: ApiSizeVariant[]; // NEW — nested variants (e.g. Sofa-style color→size structure)
 };
+
 
 type ApiProductSource = Partial<{
   _id: string;
@@ -124,6 +125,7 @@ export type ApiProduct = {
   storeId?: string;
   variantId?: string;
   variants?: ApiVariant[];
+  rating?: number;
 };
 
 const normalizeProduct = (
@@ -139,8 +141,10 @@ const normalizeProduct = (
       ? product.variants[0]
       : undefined;
 
+  const firstSizeVariant = firstVariant?.sizeVariants?.[0];
   const offerPrice = Number(
     product.minOfferPrice ??
+      firstSizeVariant?.offerPrice ??
       firstVariant?.offerPrice ??
       product.offerPrice ??
       product.sellingPrice ??
@@ -149,7 +153,7 @@ const normalizeProduct = (
       0,
   );
   const originalPrice = Number(
-    firstVariant?.mrp ?? product.mrp ?? product.price ?? offerPrice ?? 0,
+    firstSizeVariant?.mrp ?? firstVariant?.mrp ?? product.mrp ?? product.price ?? offerPrice ?? 0,
   );
   const categoryName =
     typeof product.category === "object" && product.category
@@ -194,6 +198,8 @@ export type ApiCartItem = {
   product?: ApiProduct;
   quantity: number;
   storeId?: string;
+  storeName?: string;
+  isAvailable?: boolean;
   name?: string;
   productCode?: string;
   image?: string | null;
@@ -210,14 +216,14 @@ export type ApiCartResponse = {
     | {
         _id?: string;
         items?: ApiCartItem[];
-        stores?: { items?: ApiCartItem[] }[];
+        stores?: { store?: { _id?: string; storeName?: string }; items?: ApiCartItem[] }[];
       };
   data?:
     | ApiCartItem[]
     | {
         _id?: string;
         items?: ApiCartItem[];
-        stores?: { items?: ApiCartItem[] }[];
+        stores?: { store?: { _id?: string; storeName?: string }; items?: ApiCartItem[] }[];
       };
   cartItems?: ApiCartItem[];
   cartId?: string;
@@ -344,15 +350,40 @@ export const api = {
         headers: { "x-access-token": token },
       },
     ),
-  updateProfile: (token: string, fields: { name?: string; phone?: string; address?: ApiAddress }) =>
-    request<{ message: string; user?: ApiUser }>(
-      "/login/update-profile",
-      {
-        method: "PUT",
-        headers: { "x-access-token": token },
-        body: JSON.stringify(fields),
-      },
-    ),
+  updateProfile: async (
+    token: string,
+    fields: { name?: string; phone?: string; address?: ApiAddress },
+  ) => {
+    try {
+      return await request<{ message: string; user?: ApiUser }>(
+        "/login/update-profile",
+        {
+          method: "PUT",
+          headers: { "x-access-token": token },
+          body: JSON.stringify(fields),
+        },
+      );
+    } catch (err: any) {
+      if (err?.status === 404) {
+        try {
+          return await request<{ message: string; user?: ApiUser }>(
+            "/login/update-profile",
+            {
+              method: "POST",
+              headers: { "x-access-token": token },
+              body: JSON.stringify(fields),
+            },
+          );
+        } catch {
+          console.warn(
+            "[API] /login/update-profile endpoint not available on backend; fallback to local storage.",
+          );
+          return { message: "Updated locally", user: undefined };
+        }
+      }
+      throw err;
+    }
+  },
   storeExists: async (storeId: string) => {
     const trimmed = storeId?.trim();
     if (!trimmed) return false;
@@ -368,6 +399,35 @@ export const api = {
       return false;
     }
   },
+  storeInfo: async (storeId: string) => {
+  const trimmed = storeId?.trim();
+  if (!trimmed) return null;
+  try {
+    const res = await request<{
+      store?: {
+        _id?: string;
+        storeName?: string;
+        name?: string;
+        whatsapp?: string;
+        whatsappNo?: string;
+        contactNo?: string;
+        phone?: string;
+      };
+    }>("?limit=1", { method: "GET" }, `${storeProductsUrl(trimmed)}/products`);
+    return {
+      id: trimmed,
+      mongoId: res.store?._id,
+      name: res.store?.storeName ?? res.store?.name,
+      phone:
+        res.store?.whatsappNo ??
+        res.store?.whatsapp ??
+        res.store?.contactNo ??
+        res.store?.phone,
+    };
+  } catch {
+    return null;
+  }
+},
   products: async (storeId: string, page = 1) => {
     const response = await request<{
       store?: { _id?: string; storeUniqueId?: string };
@@ -477,7 +537,7 @@ searchProducts: async (storeId: string, title: string, page = 1) => {
       },
     };
   },
-  categories: (storeId: string = DEFAULT_STORE_ID) =>
+  categories: (storeId: string) =>
   request<{
     success?: boolean;
     store?: unknown;
@@ -508,6 +568,8 @@ banners: () =>
       image: string;
       isActive: boolean;
       storeId: string;
+      categoryId?: string | { _id?: string } | null;
+      productId?: string | { _id?: string } | null;
     }[];
   }>("/banner/banners"),
   cart: async (token: string) => {

@@ -11,7 +11,8 @@ export function FloatingCart() {
   const { items } = useCart();
   const insets = useSafeAreaInsets();
   const pathname = usePathname();
-  const isCartScreen = pathname.endsWith("/cart");
+  // hidden on the cart and orders screens
+  const isCartScreen = pathname.endsWith("/cart") || pathname.endsWith("/orders");
   const itemCount = items.reduce((total, item) => total + item.quantity, 0);
   const opacity = useRef(new Animated.Value(itemCount > 0 ? 1 : 0)).current;
   const scale = useRef(new Animated.Value(itemCount > 0 ? 1 : 0.85)).current;
@@ -41,7 +42,7 @@ export function FloatingCart() {
         }),
       ]),
     ]).start(({ finished }) => {
-      if (finished) router.push("/(tabs)/cart");
+      if (finished) router.push("/cart");
       else navigating.current = false;
     });
   };
@@ -89,9 +90,10 @@ export function FloatingCart() {
           position: "absolute",
           left: 0,
           right: 0,
+          alignItems: "center",
           transform: [{ scale }],
           opacity,
-          bottom: Math.max(insets.bottom, 8) + 64,
+          bottom: Math.max(insets.bottom, 8) + 84,
         }}
       >
         <Pressable
@@ -114,10 +116,12 @@ export function FloatingCart() {
               <ThemedText style={styles.badgeText}>{itemCount}</ThemedText>
             </View>
           </View>
-          <View style={styles.copy}>
-            <ThemedText style={styles.title}>View cart</ThemedText>
-            <ThemedText style={styles.subtitle}>
-              {itemCount} item{itemCount === 1 ? "" : "s"}
+                    <View style={styles.copy}>
+            <ThemedText style={styles.title} numberOfLines={1}>
+              View cart
+            </ThemedText>
+            <ThemedText style={styles.subtitle} numberOfLines={1}>
+              · {itemCount} item{itemCount === 1 ? "" : "s"}
             </ThemedText>
           </View>
           <View style={styles.arrowWrap}>
@@ -143,25 +147,25 @@ const styles = StyleSheet.create({
     zIndex: 20,
     elevation: 20,
   },
-  cartButton: {
-    marginHorizontal: 100,
+    cartButton: {
+    alignSelf: "center",
     minHeight: 62,
     borderRadius: 100,
     paddingHorizontal: 14,
-    backgroundColor: "rgba(23, 33, 29, 0.88)",
+    backgroundColor: "rgba(69, 63, 54, 0.6)",
     flexDirection: "row",
     alignItems: "center",
     gap: 14,
     shadowColor: "#000000",
     shadowOpacity: 0.2,
     shadowRadius: 14,
-    shadowOffset: { width: 0, height: 7 },
+        shadowOffset: { width: 0, height: 7 },
   },
   iconWrap: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: "rgba(49, 91, 77, 0.9)",
+    backgroundColor: "rgba(0, 0, 0, 1)",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -173,14 +177,14 @@ const styles = StyleSheet.create({
     height: 18,
     paddingHorizontal: 4,
     borderRadius: 9,
-    backgroundColor: "#C8FF00",
+    backgroundColor: "#ff7b00dc",
     alignItems: "center",
     justifyContent: "center",
   },
   badgeText: { color: "#17211D", fontSize: 10, fontWeight: "900" },
-  copy: { flex: 1 },
+    copy: { flexDirection: "row", alignItems: "center", gap: 6 },
   title: { color: "#FFFFFF", fontSize: 14, fontWeight: "900" },
-  subtitle: { color: "#B9C8BF", fontSize: 11, marginTop: -3 },
+  subtitle: { color: "#B9C8BF", fontSize: 12, fontWeight: "600" },
   arrowWrap: {
     width: 34,
     height: 34,

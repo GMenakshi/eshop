@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Pressable,
   RefreshControl,
@@ -13,7 +14,7 @@ import { useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
 
 import { ThemedText } from "@/components/themed-text";
-import { api, DEFAULT_STORE_ID, apiImageUrl, ApiProduct } from "@/lib/api";
+import { api, apiImageUrl, ApiProduct } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
 import { useCart } from "@/context/cart-context";
 import { useAuth } from "@/context/auth-context";
@@ -52,7 +53,7 @@ const getCategoryIcon = (name: string) => {
 export default function CategoriesScreen() {
   const router = useRouter();
   const { storeId } = useStore();
-  const activeStoreId = storeId || DEFAULT_STORE_ID;
+  const activeStoreId = storeId;
   const { token } = useAuth();
   const { addItem, items: cartItems, changeQuantity } = useCart();
 
@@ -63,11 +64,16 @@ export default function CategoriesScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [saved, setSaved] = useState<string[]>([]);
 
-  const loadData = async () => {
+    const loadData = async () => {
+    if (!storeId) {
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
     try {
       const [categoryRes, productRes] = await Promise.allSettled([
-        api.categories(),
-        api.allProducts(activeStoreId),
+        api.categories(storeId),
+        api.allProducts(storeId),
       ]);
 
       if (categoryRes.status === "fulfilled" && categoryRes.value.categories) {
@@ -92,8 +98,12 @@ export default function CategoriesScreen() {
   };
 
   useEffect(() => {
+    setCategories([]);
+    setProducts([]);
+    setActiveCategoryId("all");
+    setLoading(true);
     void loadData();
-  }, [activeStoreId]);
+  }, [storeId]);
 
   const activeCategoryObj = categories.find((cat) => cat._id === activeCategoryId);
   const activeCategoryName =
@@ -138,6 +148,10 @@ export default function CategoriesScreen() {
       );
     } catch (error) {
       console.warn(error);
+      Alert.alert(
+        "Product Unavailable",
+        error instanceof Error ? error.message : "This product is not available right now.",
+      );
     }
   };
 
@@ -416,7 +430,7 @@ const styles = StyleSheet.create({
     borderRightWidth: 1,
     borderRightColor: "#E0E0D8",
   },
-  sidebarContent: { paddingBottom: 24 },
+  sidebarContent: { paddingBottom: 130 },
   sidebarRow: {
     width: SIDEBAR_WIDTH,
     alignItems: "center",
@@ -499,7 +513,7 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
 
-  productListContent: { padding: 10, paddingBottom: 40 },
+  productListContent: { padding: 10, paddingBottom: 130 },
   productGrid: {
     flexDirection: "row",
     flexWrap: "wrap",

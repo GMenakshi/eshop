@@ -1,23 +1,22 @@
 import { Image } from "expo-image";
 import { router } from "expo-router";
 import { SymbolView } from "expo-symbols";
-import { useMemo } from "react";
-import { Pressable, ScrollView, StyleSheet, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useMemo, useState, useEffect } from "react";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { ThemedText } from "@/components/themed-text";
 import { useAuth } from "@/context/auth-context";
-import {
-  cartItemStoreId,
-  useCart,
-  type CartItem,
-} from "@/context/cart-context";
-import { apiImageUrl } from "@/lib/api";
+import { useCart, type CartItem } from "@/context/cart-context";
+import { useStore } from "@/lib/store-context";
+import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
+import { ProductRail } from "@/components/product-rail";
 
-const ink = "#17211D";
-const mutedInk = "#748078";
-const surface = "#E8EFE7";
-const border = "#D7E0D6";
-const danger = "#B3261E";
+const ink = "#1A1A1A";
+const mutedInk = "#999999";
+const surface = "#FFFFFF";
+const bgLight = "#F4F5F6";
+const border = "#EAEAEA";
+const accent = "#000000";
 
 const productName = (product?: CartItem["product"]) => {
   if (!product) return "Product";
@@ -26,382 +25,399 @@ const productName = (product?: CartItem["product"]) => {
   return "Product";
 };
 
-const productVariant = (product?: CartItem["product"]) => {
-  if (!product) return "Available now";
-  if ("variant" in product && product.variant) return product.variant;
-  if ("unit" in product && product.unit) return product.unit;
-  if ("weight" in product && product.weight) return product.weight;
-  if ("size" in product && product.size) return product.size;
-  return "Available now";
-};
-
-const isAvailable = (item: CartItem) => item.isAvailable !== false;
 const unitPrice = (item: CartItem) =>
   typeof item.product?.price === "number" ? item.product.price : 0;
-
-type StoreGroup = {
-  storeId: string;
-  name: string;
-  items: CartItem[];
-  count: number; // every unit in this store's section
-  subtotal: number; // available items only
-  hasAvailable: boolean;
-  hasUnavailable: boolean;
-};
+const originalPrice = (item: CartItem) =>
+  typeof (item.product as any)?.originalPrice === "number"
+    ? (item.product as any).originalPrice
+    : unitPrice(item);
 
 export default function CartScreen() {
   const { token } = useAuth();
+  const insets = useSafeAreaInsets();
   const { items, changeQuantity, removeItem } = useCart();
+  const { storeId } = useStore();
+  const [promoCode, setPromoCode] = useState("");
+  const [products, setProducts] = useState<ApiProduct[]>([]);
 
-  const itemCount = items.reduce(
-    (total, item) => total + (item?.quantity || 0),
-    0,
-  );
+  useEffect(() => {
+    if (!storeId) return;
+    api
+      .products(storeId)
+      .then((response) => setProducts(response.products.slice(0, 8)))
+      .catch(() => undefined);
+  }, [storeId]);
 
-  // One section per store, in the order the stores first appear in the cart.
-  const groups = useMemo(() => {
-    const map = new Map<string, StoreGroup>();
-    for (const item of items) {
-      if (!item?.product) continue;
-      const key = cartItemStoreId(item);
-      let group = map.get(key);
-      if (!group) {
-        group = {
-          storeId: key,
-          name:
-            item.storeName ||
-            (key === "unknown" ? "Other items" : `Store ${map.size + 1}`),
-          items: [],
-          count: 0,
-          subtotal: 0,
-          hasAvailable: false,
-          hasUnavailable: false,
-        };
-        map.set(key, group);
-      } else if (item.storeName) {
-        group.name = item.storeName;
-      }
-      group.items.push(item);
-      group.count += item.quantity || 0;
-      if (isAvailable(item)) {
-        group.hasAvailable = true;
-        group.subtotal += unitPrice(item) * (item.quantity || 1);
-      } else {
-        group.hasUnavailable = true;
-      }
-    }
-    return [...map.values()];
-  }, [items]);
+  const subtotal = items.reduce((sum, item) => sum + unitPrice(item) * (item.quantity || 1), 0);
+  const totalOriginal = items.reduce((sum, item) => sum + originalPrice(item) * (item.quantity || 1), 0);
+  const totalDiscount = totalOriginal - subtotal;
+  const payable = subtotal;
 
-  // Totals only count items that can actually be ordered.
-  const subtotal = groups.reduce((sum, group) => sum + group.subtotal, 0);
-  const canCheckoutAll = groups.some((group) => group.hasAvailable);
-  const hasUnavailable = groups.some((group) => group.hasUnavailable);
-
-  const goCheckout = (storeId?: string) => {
+  const handleCheckout = () => {
     if (!token) return router.push("/sign-in");
-    router.push(
-      storeId ? { pathname: "/checkout", params: { storeId } } : "/checkout",
-    );
+    const unavailableItems = items.filter((item) => item.isAvailable === false);
+    if (unavailableItems.length > 0) {
+      Alert.alert(
+        "Unavailable Items in Cart",
+        "Some items in your cart are no longer available. Please remove them before proceeding to checkout.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Remove & Proceed",
+            onPress: async () => {
+              for (const item of unavailableItems) {
+                await removeItem(item);
+              }
+              const remaining = items.filter((item) => item.isAvailable !== false);
+              if (remaining.length > 0) {
+                router.push("/checkout");
+              }
+            },
+          },
+        ]
+      );
+      return;
+    }
+    router.push("/checkout");
   };
 
   const renderItem = (item: CartItem, index: number) => {
     const { quantity, product } = item;
     const itemKey = item.cartItemId || item.id || `cart-item-${index}`;
-    const imageUri = product.image
-      ? apiImageUrl(product.image) ?? product.image
-      : undefined;
-    const available = isAvailable(item);
+    const imageUri = product.image ? (apiImageUrl(product.image) ?? product.image) : undefined;
+    const isUnavailable = item.isAvailable === false;
+    
+    // Using mock reviews to match design since API doesn't provide them per cart item easily
+    const rating = 4.8;
+    const reviewCount = 2320;
 
     return (
-      <View
-        style={[styles.itemCard, !available && styles.itemCardUnavailable]}
-        key={itemKey}
-      >
-        {imageUri ? (
-          <Image
-            source={{ uri: imageUri }}
-            style={styles.itemImage}
-            contentFit="cover"
-          />
-        ) : (
-          <View style={styles.itemImage} />
-        )}
-        <View style={styles.itemInfo}>
-          <ThemedText style={styles.productName}>
-            {productName(product)}
-          </ThemedText>
-          <ThemedText style={styles.muted}>{productVariant(product)}</ThemedText>
-          {!available && (
-            <ThemedText style={styles.unavailableText}>
-              Currently unavailable
-            </ThemedText>
+      <View style={[styles.itemCard, isUnavailable && styles.unavailableCard]} key={itemKey}>
+        <View style={styles.itemImageWrap}>
+          {imageUri ? (
+            <Image source={{ uri: imageUri }} style={styles.itemImage} contentFit="contain" />
+          ) : (
+            <View style={styles.itemImagePlaceholder} />
           )}
-          <View style={styles.itemActions}>
-            <View style={styles.quantityControl}>
-              <Pressable
-                accessibilityLabel={`Decrease ${productName(product)}`}
-                onPress={() => changeQuantity(item, -1)}
-                style={styles.quantityButton}
-              >
-                <ThemedText style={styles.controlText}>-</ThemedText>
-              </Pressable>
-              <ThemedText style={styles.quantity}>{quantity}</ThemedText>
-              <Pressable
-                accessibilityLabel={`Increase ${productName(product)}`}
-                onPress={() => changeQuantity(item, 1)}
-                style={styles.quantityButton}
-              >
-                <ThemedText style={styles.controlText}>+</ThemedText>
-              </Pressable>
-            </View>
+        </View>
+        <View style={styles.itemInfo}>
+          <View style={styles.itemHeaderRow}>
+            <ThemedText style={styles.productName} numberOfLines={1}>{productName(product)}</ThemedText>
             <Pressable
-              accessibilityLabel={`Remove ${productName(product)}`}
+              accessibilityLabel="Remove item"
               onPress={() => removeItem(item)}
-              style={styles.deleteButton}
+              hitSlop={8}
             >
-              <SymbolView name="trash" size={20} tintColor="#A6A6AD" />
+              <SymbolView name={{ ios: "trash", android: "delete", web: "delete" }} size={16} tintColor="#E53935" />
             </Pressable>
           </View>
+          {isUnavailable ? (
+            <View style={styles.unavailableBadge}>
+              <Text style={styles.unavailableBadgeText}>Out of Stock / Unavailable</Text>
+            </View>
+          ) : (
+            <>
+              <View style={styles.ratingRow}>
+                <ThemedText style={styles.ratingText}>{rating} ({reviewCount} Reviews)</ThemedText>
+              </View>
+              <View style={styles.starsRow}>
+                {[1, 2, 3, 4, 5].map((s) => (
+                  <Text key={s} style={styles.starIcon}>★</Text>
+                ))}
+              </View>
+            </>
+          )}
+          <View style={styles.priceRow}>
+            <ThemedText style={styles.price}>₹{unitPrice(item).toFixed(2)}</ThemedText>
+            <View style={styles.quantityControl}>
+              <Pressable
+                accessibilityLabel="Decrease quantity"
+                onPress={() => {
+                  if (quantity > 1) {
+                    changeQuantity(item, -1);
+                  } else {
+                    removeItem(item);
+                  }
+                }}
+                style={styles.qtyBtn}
+              >
+                <ThemedText style={styles.qtyBtnText}>-</ThemedText>
+              </Pressable>
+              <ThemedText style={styles.qtyValue}>{quantity}</ThemedText>
+              <Pressable
+                accessibilityLabel="Increase quantity"
+                onPress={() => changeQuantity(item, 1)}
+                style={styles.qtyBtnAdd}
+              >
+                <ThemedText style={styles.qtyBtnAddText}>+</ThemedText>
+              </Pressable>
+            </View>
+          </View>
         </View>
-        {available && (
-          <ThemedText style={styles.price}>
-            ₹{unitPrice(item) * quantity}
-          </ThemedText>
-        )}
       </View>
     );
   };
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={["top"]}>
-      <ScrollView
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.headingRow}>
-          <ThemedText style={styles.heading}>Your cart</ThemedText>
-          <ThemedText style={styles.itemCount}>({itemCount} items)</ThemedText>
+    <SafeAreaView style={styles.screen} edges={["top"]}>
+      {/* ─── Header ─── */}
+      <View style={styles.header}>
+        <Pressable accessibilityLabel="Go back" onPress={() => router.back()} style={styles.headerBtn}>
+          <SymbolView name={{ ios: "arrow.left", android: "arrow_back", web: "arrow_back" }} size={20} tintColor={ink} />
+        </Pressable>
+        <ThemedText style={styles.headerTitle}>My Cart</ThemedText>
+        <View style={styles.headerBtn}>
+          <SymbolView name={{ ios: "bag", android: "shopping_bag", web: "shopping_bag" }} size={20} tintColor={ink} />
         </View>
+      </View>
 
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {items.length === 0 ? (
           <View style={styles.emptyState}>
             <ThemedText style={styles.emptyTitle}>Your cart is empty</ThemedText>
-            <ThemedText style={styles.muted}>
-              Add something useful to get moving.
-            </ThemedText>
+            <ThemedText style={styles.mutedText}>Start adding some items!</ThemedText>
           </View>
         ) : (
-          groups.map((group) => (
-            <View key={group.storeId} style={styles.storeSection}>
-              <View style={styles.storeHeader}>
-                <ThemedText style={styles.storeName}>{group.name}</ThemedText>
-                <ThemedText style={styles.storeCount}>
-                  {group.count} {group.count === 1 ? "item" : "items"}
-                </ThemedText>
-              </View>
+          <>
+            <View style={styles.itemList}>
+              {items.map((item, index) => renderItem(item, index))}
+            </View>
 
-              <View style={styles.itemList}>
-                {group.items.map((item, index) => renderItem(item, index))}
-              </View>
+            {/* ─── Promo Code ─── */}
+            <View style={styles.promoContainer}>
+              <TextInput
+                style={styles.promoInput}
+                placeholder="Enter Promo Code"
+                placeholderTextColor={mutedInk}
+                value={promoCode}
+                onChangeText={setPromoCode}
+              />
+              <Pressable style={styles.applyBtn}>
+                <ThemedText style={styles.applyBtnText}>Apply</ThemedText>
+              </Pressable>
+            </View>
 
-              <View style={styles.storeFooter}>
-                <View style={styles.summaryLine}>
-                  <ThemedText style={styles.muted}>Store subtotal</ThemedText>
-                  <ThemedText style={styles.summaryValue}>
-                    ₹{group.subtotal.toFixed(2)}
-                  </ThemedText>
+            {/* ─── Bill Details ─── */}
+            <View style={styles.billContainer}>
+              <ThemedText style={styles.billTitle}>Bill Details</ThemedText>
+              <View style={styles.billCard}>
+                <View style={styles.billRow}>
+                  <View style={styles.billLabelGroup}>
+                    <ThemedText style={styles.billLabel}>Total item price</ThemedText>
+                    <SymbolView name={{ ios: "chevron.down", android: "expand_more", web: "expand_more" }} size={12} tintColor={ink} />
+                  </View>
+                  <ThemedText style={styles.billValue}>₹{totalOriginal.toFixed(2)}</ThemedText>
                 </View>
-                {group.hasUnavailable && (
-                  <ThemedText style={styles.unavailableText}>
-                    Unavailable items aren't included in the subtotal.
-                  </ThemedText>
-                )}
-                {group.storeId !== "unknown" && (
-                  <Pressable
-                    disabled={!group.hasAvailable}
-                    onPress={() => goCheckout(group.storeId)}
-                    style={[
-                      styles.storeCheckoutButton,
-                      !group.hasAvailable && styles.disabledButton,
-                    ]}
-                  >
-                    <ThemedText style={styles.storeCheckoutText}>
-                      CHECKOUT THIS STORE
-                    </ThemedText>
-                  </Pressable>
-                )}
+                <View style={styles.billRow}>
+                  <View style={styles.billLabelGroup}>
+                    <ThemedText style={styles.billLabel}>Total discount</ThemedText>
+                    <SymbolView name={{ ios: "chevron.down", android: "expand_more", web: "expand_more" }} size={12} tintColor={ink} />
+                  </View>
+                  <ThemedText style={styles.billValue}>-₹{totalDiscount.toFixed(2)}</ThemedText>
+                </View>
+                <View style={[styles.billRow, styles.billRowLast]}>
+                  <ThemedText style={styles.billTotalLabel}>Total payable</ThemedText>
+                  <ThemedText style={styles.billTotalValue}>₹{payable.toFixed(2)}</ThemedText>
+                </View>
               </View>
             </View>
-          ))
+          </>
         )}
+        
+        {/* Restore API driven product rail */}
+        {products.length > 0 && (
+          <View style={{ marginTop: 20 }}>
+            <ProductRail title="Keep exploring" products={products} />
+          </View>
+        )}
+      </ScrollView>
 
-        <View style={styles.summary}>
-          <ThemedText style={styles.summaryTitle}>Order summary</ThemedText>
-          <View style={styles.summaryLine}>
-            <ThemedText style={styles.muted}>
-              Subtotal ({groups.length} {groups.length === 1 ? "store" : "stores"})
-            </ThemedText>
-            <ThemedText style={styles.summaryValue}>
-              ₹{subtotal.toFixed(2)}
-            </ThemedText>
-          </View>
-          <View style={styles.summaryLine}>
-            <ThemedText style={styles.muted}>Shipping</ThemedText>
-            <ThemedText style={styles.summaryValue}>
-              Calculated next step
-            </ThemedText>
-          </View>
-          {hasUnavailable && (
-            <ThemedText style={styles.unavailableText}>
-              Unavailable items aren't included in this order.
-            </ThemedText>
-          )}
-          <View style={styles.divider} />
-          <View style={styles.summaryLine}>
-            <ThemedText style={styles.totalLabel}>Total</ThemedText>
-            <ThemedText style={styles.total}>₹{subtotal.toFixed(2)}</ThemedText>
-          </View>
-          <Pressable
-            disabled={!canCheckoutAll}
-            onPress={() => goCheckout()}
-            style={[styles.checkoutButton, !canCheckoutAll && styles.disabledButton]}
-          >
-            <ThemedText style={styles.checkoutText}>CHECKOUT ALL STORES</ThemedText>
+      {/* ─── Bottom Action ─── */}
+      {items.length > 0 && (
+        <View
+          style={[
+            styles.bottomBar,
+            { paddingBottom: Math.max(insets.bottom, 16) + 8 },
+          ]}
+        >
+          <Pressable style={styles.buyBtn} onPress={handleCheckout}>
+            <ThemedText style={styles.buyBtnText}>Order Now</ThemedText>
           </Pressable>
         </View>
-      </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#F4F4ED" },
-  content: { paddingHorizontal: 24, paddingBottom: 130, gap: 24 },
-  headingRow: {
+  screen: { flex: 1, backgroundColor: bgLight },
+  header: {
     flexDirection: "row",
-    alignItems: "baseline",
-    gap: 8,
-    paddingTop: 14,
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingVertical: 12,
   },
-  heading: {
-    color: ink,
-    fontSize: 38,
-    lineHeight: 42,
-    fontWeight: "800",
-    letterSpacing: -1.2,
+  headerBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: surface,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  itemCount: { color: mutedInk, fontSize: 16 },
+  headerTitle: { fontSize: 18, fontWeight: "700", color: ink },
+  content: { paddingHorizontal: 20, paddingBottom: 40, paddingTop: 10 },
+  
   itemList: { gap: 16 },
   itemCard: {
-    minHeight: 158,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: border,
     backgroundColor: surface,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-  },
-  itemCardUnavailable: { opacity: 0.6 },
-  itemImage: {
-    width: 132,
-    height: 132,
-    borderRadius: 10,
-    backgroundColor: "#E1E9E0",
-  },
-  itemInfo: {
-    flex: 1,
-    alignSelf: "stretch",
-    justifyContent: "space-between",
-    paddingVertical: 4,
-  },
-  productName: { color: ink, fontSize: 16, lineHeight: 21, fontWeight: "700" },
-  muted: { color: mutedInk, fontSize: 14, lineHeight: 20 },
-  unavailableText: { color: danger, fontSize: 12, fontWeight: "700" },
-  itemActions: { flexDirection: "row", alignItems: "center", gap: 16 },
-  quantityControl: { flexDirection: "row", alignItems: "center", gap: 8 },
-  quantityButton: {
-    width: 34,
-    height: 34,
-    borderWidth: 1,
-    borderColor: border,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  controlText: { color: ink, fontSize: 21, fontWeight: "300", lineHeight: 23 },
-  quantity: { color: ink, fontSize: 16, minWidth: 18, textAlign: "center" },
-  deleteButton: { padding: 6 },
-  price: { color: ink, fontSize: 16, fontWeight: "700", alignSelf: "center" },
-  summary: { backgroundColor: surface, borderRadius: 16, padding: 24, gap: 18 },
-  summaryTitle: {
-    color: ink,
-    fontSize: 22,
-    fontWeight: "800",
-    marginBottom: 10,
-  },
-  summaryLine: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 16,
-  },
-  summaryValue: { color: ink, fontSize: 15, textAlign: "right" },
-  divider: { height: 1, backgroundColor: border, marginVertical: 2 },
-  totalLabel: { color: ink, fontSize: 21, fontWeight: "800" },
-  total: { color: ink, fontSize: 23, fontWeight: "800" },
-  checkoutButton: {
-    backgroundColor: ink,
-    borderRadius: 3,
-    height: 52,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 18,
-  },
-  checkoutText: {
-    color: "#F4F4ED",
-    fontSize: 13,
-    letterSpacing: 3,
-    fontWeight: "900",
-  },
-  disabledButton: { opacity: 0.35 },
-  emptyState: { paddingVertical: 60, alignItems: "center", gap: 8 },
-  emptyTitle: { color: ink, fontSize: 22, fontWeight: "700" },
-  storeSection: { gap: 14 },
-  storeHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "baseline",
-  },
-  storeName: {
-    color: ink,
-    fontSize: 20,
-    fontWeight: "800",
-    letterSpacing: -0.4,
-  },
-  storeCount: { color: mutedInk, fontSize: 13, fontWeight: "700" },
-  storeFooter: {
-    backgroundColor: surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: border,
+    borderRadius: 20,
     padding: 14,
-    gap: 12,
+    flexDirection: "row",
+    gap: 16,
+    alignItems: "center",
   },
-  storeCheckoutButton: {
-    height: 46,
-    borderRadius: 3,
+  unavailableCard: {
+    opacity: 0.7,
     borderWidth: 1,
-    borderColor: ink,
+    borderColor: "#FFCDD2",
+  },
+  itemImageWrap: {
+    width: 100,
+    height: 100,
+    backgroundColor: bgLight,
+    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
   },
-  storeCheckoutText: {
-    color: ink,
-    fontSize: 11,
-    letterSpacing: 2,
-    fontWeight: "900",
+  itemImage: { width: "80%", height: "80%" },
+  itemImagePlaceholder: { width: "100%", height: "100%", backgroundColor: border, borderRadius: 16 },
+  itemInfo: { flex: 1, justifyContent: "center" },
+  itemHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 4,
   },
+  productName: { flex: 1, fontSize: 16, fontWeight: "700", color: ink, marginRight: 8 },
+  unavailableBadge: {
+    backgroundColor: "#FFEBEE",
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    alignSelf: "flex-start",
+    marginBottom: 8,
+  },
+  unavailableBadgeText: {
+    color: "#D32F2F",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  ratingRow: { flexDirection: "row", alignItems: "center", marginBottom: 2 },
+  ratingText: { fontSize: 12, color: mutedInk, fontWeight: "500" },
+  starsRow: { flexDirection: "row", gap: 2, marginBottom: 12 },
+  starIcon: { color: "#F5A623", fontSize: 12 },
+  
+  priceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  price: { fontSize: 18, fontWeight: "800", color: ink },
+  
+  quantityControl: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  qtyBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#DCDCDC",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qtyBtnText: { fontSize: 14, fontWeight: "600", color: mutedInk },
+  qtyValue: { fontSize: 14, fontWeight: "700", color: ink },
+  qtyBtnAdd: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: ink,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qtyBtnAddText: { fontSize: 14, fontWeight: "600", color: surface },
+  
+  promoContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: surface,
+    borderRadius: 30,
+    marginTop: 24,
+    paddingLeft: 20,
+    paddingRight: 6,
+    paddingVertical: 6,
+  },
+  promoInput: {
+    flex: 1,
+    fontSize: 14,
+    color: ink,
+    fontWeight: "500",
+  },
+  applyBtn: {
+    backgroundColor: accent,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 24,
+  },
+  applyBtnText: { color: surface, fontSize: 14, fontWeight: "700" },
+
+  billContainer: { marginTop: 28 },
+  billTitle: { fontSize: 15, fontWeight: "700", color: ink, marginBottom: 12, paddingLeft: 4 },
+  billCard: {
+    backgroundColor: surface,
+    borderRadius: 20,
+    padding: 20,
+  },
+  billRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 8,
+  },
+  billRowLast: {
+    paddingVertical: 8,
+    marginTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: border,
+    paddingTop: 16,
+  },
+  billLabelGroup: { flexDirection: "row", alignItems: "center", gap: 6 },
+  billLabel: { fontSize: 14, color: ink, fontWeight: "500" },
+  billValue: { fontSize: 14, color: ink, fontWeight: "700" },
+  billTotalLabel: { fontSize: 15, color: ink, fontWeight: "700" },
+  billTotalValue: { fontSize: 16, color: ink, fontWeight: "800" },
+
+  bottomBar: {
+    paddingHorizontal: 24,
+    paddingBottom: 16,
+    paddingTop: 10,
+    backgroundColor: bgLight,
+  },
+  buyBtn: {
+    backgroundColor: accent,
+    borderRadius: 30,
+    paddingVertical: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  buyBtnText: { color: surface, fontSize: 16, fontWeight: "700" },
+  
+  emptyState: { paddingVertical: 80, alignItems: "center" },
+  emptyTitle: { fontSize: 20, fontWeight: "700", color: ink, marginBottom: 8 },
+  mutedText: { fontSize: 15, color: mutedInk },
 });

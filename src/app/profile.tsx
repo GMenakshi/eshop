@@ -1,5 +1,6 @@
+import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   Alert,
   Modal,
@@ -8,24 +9,67 @@ import {
   StyleSheet,
   TextInput,
   View,
+  useWindowDimensions
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-
+import { useWishlist } from "@/context/wishlist-context";
 import { ThemedText } from "@/components/themed-text";
 import { useAuth } from "@/context/auth-context";
-import { api, type ApiAddress } from "@/lib/api";
-import { goBackOrHome } from "@/lib/navigation";
+import { addSavedAddress, getSavedAddresses  } from "@/lib/addressStorage";
+import { api } from "@/lib/api";
+import { Animated, Dimensions } from "react-native";
+import { Image } from "expo-image";
+import { apiImageUrl, type ApiProduct } from "@/lib/api";
+import { useStore } from "@/lib/store-context";
+import { StoreSwitcher } from "@/components/store-switcher";
 
-const ink = "#17211D";
-const muted = "#748078";
-const surface = "#E8EFE7";
-const border = "#D7E0D6";
-const field = "#E4ECE4";
+
+const ink = "#1A1A1A";
+const muted = "#8A8A8A";
+const field = "#F0F0F0";
+const screenBg = "#F5F5F5";
+const accent = "#F5A623";
+const screenWidth = Dimensions.get("window").width;
 
 export default function ProfileScreen() {
   const { user, token, refreshUser, signOut } = useAuth();
+  const { items: wishlistItems } = useWishlist();
   const [loading, setLoading] = useState(true);
+const { storeId, activeStore } = useStore();
+const [suggestedProducts, setSuggestedProducts] = useState<ApiProduct[]>([]);
   const [showAddressModal, setShowAddressModal] = useState(false);
+const [showProfileModal, setShowProfileModal] = useState(false);
+const [showSettingsModal, setShowSettingsModal] = useState(false);
+
+const addressSlide = useRef(new Animated.Value(screenWidth)).current;
+const profileSlide = useRef(new Animated.Value(screenWidth)).current;
+const settingsSlide = useRef(new Animated.Value(screenWidth)).current;
+const [savedAddresses, setSavedAddresses] = useState<any[]>([]);
+const [addressPanelMode, setAddressPanelMode] = useState<"list" | "form">("list");
+const openPanel = (
+  setVisible: (v: boolean) => void,
+  slideAnim: Animated.Value,
+) => {
+  setVisible(true);
+  slideAnim.setValue(screenWidth);
+  Animated.timing(slideAnim, {
+    toValue: 0,
+    duration: 280,
+    useNativeDriver: true,
+  }).start();
+};
+
+const closePanel = (
+  setVisible: (v: boolean) => void,
+  slideAnim: Animated.Value,
+) => {
+  Animated.timing(slideAnim, {
+    toValue: screenWidth,
+    duration: 240,
+    useNativeDriver: true,
+  }).start(() => setVisible(false));
+};
+
   const [saving, setSaving] = useState(false);
   const [addressForm, setAddressForm] = useState<{
     addressLine: string;
@@ -51,42 +95,128 @@ export default function ProfileScreen() {
     refreshUser().finally(() => setLoading(false));
   }, [token, refreshUser]);
 
+useEffect(() => {
+  if (!storeId) return;
+  let active = true;
+  api
+    .allProducts(storeId)
+    .then((catalog) => {
+      if (active) setSuggestedProducts(catalog.slice(0, 4));
+    })
+    .catch(() => undefined);
+  return () => {
+    active = false;
+  };
+}, [storeId]);
+
   const address = user?.address;
   const hasAddress =
     address &&
     (address.addressLine || address.city || address.state || address.pincode);
 
-  const openEditAddress = () => {
-    setAddressForm({
-      addressLine: address?.addressLine ?? "",
-      area: address?.area ?? "",
-      city: address?.city ?? "",
-      state: address?.state ?? "",
-      pincode: address?.pincode ?? "",
-      country: address?.country ?? "India",
-    });
-    setShowAddressModal(true);
-  };
+const openEditAddress = () => {
+  setAddressPanelMode("list");
+  loadSavedAddresses();
+  openPanel(setShowAddressModal, addressSlide);
+};
+
+const loadSavedAddresses = async () => {
+  if (!user?._id) return;
+  try {
+    const list = await getSavedAddresses(user._id);
+    setSavedAddresses(list ?? []);
+  } catch {
+    setSavedAddresses([]);
+  }
+};
+
+const startAddNewAddress = () => {
+  setAddressForm({
+    addressLine: "",
+    area: "",
+    city: "",
+    state: "",
+    pincode: "",
+    country: "India",
+  });
+  setAddressPanelMode("form");
+};
+
+const startEditAddress = (addr: any) => {
+  setAddressForm({
+    addressLine: addr.addressLine ?? "",
+    area: addr.area ?? "",
+    city: addr.city ?? "",
+    state: addr.state ?? "",
+    pincode: addr.pincode ?? "",
+    country: addr.country ?? "India",
+  });
+  setAddressPanelMode("form");
+};
+
+const handleAddressOptions = (addr: any) => {
+  Alert.alert(addr.fullName || "Address", undefined, [
+    { text: "Edit", onPress: () => startEditAddress(addr) },
+    {
+      text: "Delete",
+      style: "destructive",
+      onPress: () => {
+        // Note: this removes it from local state only.
+        // Add a deleteSavedAddress() export in addressStorage.ts
+        // to persist removal, then call it here.
+        setSavedAddresses((prev) => prev.filter((a) => a !== addr));
+      },
+    },
+    { text: "Cancel", style: "cancel" },
+  ]);
+};
+
+const openMyProfile = () => {
+  openPanel(setShowProfileModal, profileSlide);
+};
+
+const openSettings = () => {
+  openPanel(setShowSettingsModal, settingsSlide);
+};
 
   const saveAddress = async () => {
     if (!token) return;
-    if (!addressForm.addressLine.trim() || !addressForm.city.trim() || !addressForm.state.trim() || !addressForm.pincode.trim()) {
-      return Alert.alert("Incomplete", "Please fill in address, city, state, and pincode.");
+    if (
+      !addressForm.addressLine.trim() ||
+      !addressForm.city.trim() ||
+      !addressForm.state.trim() ||
+      !addressForm.pincode.trim()
+    ) {
+      return Alert.alert(
+        "Incomplete",
+        "Please fill in address, city, state, and pincode.",
+      );
     }
     setSaving(true);
     try {
+      const formattedAddr = {
+        fullName: user?.name ?? "",
+        phone: user?.phone ?? "",
+        addressLine: addressForm.addressLine.trim(),
+        area: addressForm.area.trim() || undefined,
+        city: addressForm.city.trim(),
+        state: addressForm.state.trim(),
+        pincode: addressForm.pincode.trim(),
+        country: addressForm.country.trim() || "India",
+      };
+
       await api.updateProfile(token, {
-        address: {
-          addressLine: addressForm.addressLine.trim(),
-          area: addressForm.area.trim() || undefined,
-          city: addressForm.city.trim(),
-          state: addressForm.state.trim(),
-          pincode: addressForm.pincode.trim(),
-          country: addressForm.country.trim() || "India",
-        },
+        address: formattedAddr,
       });
+
+      if (user?._id) {
+        await addSavedAddress(user._id, formattedAddr);
+      }
+
       await refreshUser();
-      setShowAddressModal(false);
+      await loadSavedAddresses();
+      setAddressPanelMode("list");
+      Alert.alert("Success", "Address saved successfully.");
     } catch (error) {
       Alert.alert(
         "Could not save address",
@@ -97,388 +227,731 @@ export default function ProfileScreen() {
     }
   };
 
+  const handleSignOut = () => {
+    Alert.alert("Sign out", "Are you sure you want to sign out?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Sign out",
+        style: "destructive",
+        onPress: () => {
+          signOut();
+          router.replace("/sign-in");
+        },
+      },
+    ]);
+  };
+
+  // const openMyProfile = () => {
+  //   Alert.alert(
+  //     fullName,
+  //     `Email: ${user?.email ?? "Not available"}\nPhone: ${user?.phone ?? "Not available"
+  //     }\nRole: ${user?.role ?? "Customer"}`,
+  //   );
+  // };
+
   if (!token || loading) {
     return null;
   }
 
   const fullName = user
     ? user.name?.trim() ||
-      `${user.first_name ?? ""} ${user.last_name ?? ""}`.trim() ||
-      "Your profile"
+    `${user.first_name ?? ""} ${user.last_name ?? ""}`.trim() ||
+    "Your profile"
     : "Your profile";
   const initials = user
     ? (() => {
-        const source =
-          user.name?.trim() ||
-          `${user.first_name ?? ""} ${user.last_name ?? ""}`.trim();
-        return (
-          source
-            .split(/\s+/)
-            .filter(Boolean)
-            .slice(0, 2)
-            .map((part) => part[0]?.toUpperCase() ?? "")
-            .join("") || "--"
-        );
-      })()
+      const source =
+        user.name?.trim() ||
+        `${user.first_name ?? ""} ${user.last_name ?? ""}`.trim();
+      return (
+        source
+          .split(/\s+/)
+          .filter(Boolean)
+          .slice(0, 2)
+          .map((part) => part[0]?.toUpperCase() ?? "")
+          .join("") || "--"
+      );
+    })()
     : "--";
 
   return (
-    <SafeAreaView style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.header}>
-          <View>
-            <ThemedText style={styles.eyebrow}>ESHOP / ACCOUNT</ThemedText>
-            <ThemedText style={styles.title}>Profile</ThemedText>
-          </View>
-          <Pressable onPress={goBackOrHome}>
-            <ThemedText style={styles.close}>Done</ThemedText>
+    <SafeAreaView style={styles.screen} edges={["top"]}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ─── Top Bar ─── */}
+        <View style={styles.topBar}>
+          <View style={{ flex: 1 }} />
+          <Pressable
+            accessibilityLabel="Wishlist"
+            style={styles.topBarBtn}
+            onPress={() => router.push("/wishlist")}
+          >
+            <Ionicons name="heart-outline" size={20} color={ink} />
+            {/* {wishlistItems.length > 0 && (
+              <View style={styles.wishlistCountDot}>
+                <ThemedText style={styles.wishlistCountText}>
+                  {wishlistItems.length > 9 ? "9+" : wishlistItems.length}
+                </ThemedText>
+              </View>
+            )} */}
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Notifications"
+            style={styles.topBarBtn}
+            onPress={() => router.push("/notifications")}
+          >
+            <Ionicons name="notifications-outline" size={20} color={ink} />
+            <View style={styles.notifDot} />
           </Pressable>
         </View>
-        <View style={styles.identity}>
+
+        {/* ─── Identity Row ─── */}
+        <Pressable style={styles.identityRow} onPress={openMyProfile}>
           <View style={styles.avatar}>
             <ThemedText style={styles.avatarText}>{initials}</ThemedText>
           </View>
-          <View>
-            <ThemedText style={styles.name}>
-              {loading ? "Loading..." : fullName}
+          <View style={styles.identityText}>
+            <ThemedText style={styles.identityPrimary} numberOfLines={2}>
+              {user?.email || fullName}
             </ThemedText>
-            <ThemedText style={styles.email}>{user?.email ?? ""}</ThemedText>
+            {user?.phone ? (
+              <ThemedText style={styles.identitySecondary}>{user.phone}</ThemedText>
+            ) : null}
+            {user?.email ? (
+              <ThemedText style={styles.identitySecondary}>{user.email}</ThemedText>
+            ) : null}
           </View>
-        </View>
-        <View style={styles.details}>
-          <Detail label="EMAIL" value={user?.email ?? "Not available"} />
-          <Detail label="PHONE" value={user?.phone ?? "Not available"} />
-          <Detail label="ACCOUNT ROLE" value={user?.role ?? "Customer"} />
-        </View>
-
-        {/* Delivery Address Section */}
-        <View style={styles.addressSection}>
-          <View style={styles.addressHeader}>
-            <ThemedText style={styles.addressTitle}>Delivery Address</ThemedText>
-            <Pressable onPress={openEditAddress}>
-              <ThemedText style={styles.addressEditLink}>
-                {hasAddress ? "EDIT" : "ADD"}
-              </ThemedText>
-            </Pressable>
-          </View>
-          {hasAddress ? (
-            <View style={styles.addressCard}>
-              <ThemedText style={styles.addressLine}>
-                {address.addressLine}
-              </ThemedText>
-              {address.area ? (
-                <ThemedText style={styles.addressSub}>{address.area}</ThemedText>
-              ) : null}
-              <ThemedText style={styles.addressSub}>
-                {[address.city, address.state].filter(Boolean).join(", ")}
-                {address.pincode ? ` - ${address.pincode}` : ""}
-              </ThemedText>
-              <ThemedText style={styles.addressCountry}>
-                {address.country ?? "India"}
-              </ThemedText>
-            </View>
-          ) : (
-            <Pressable style={styles.addAddressCard} onPress={openEditAddress}>
-              <ThemedText style={styles.addAddressPlus}>+</ThemedText>
-              <ThemedText style={styles.addAddressText}>
-                Add your delivery address
-              </ThemedText>
-              <ThemedText style={styles.addAddressSub}>
-                This will be used for faster checkout
-              </ThemedText>
-            </Pressable>
-          )}
-        </View>
-
-        <Pressable style={styles.editButton} onPress={openEditAddress}>
-          <ThemedText style={styles.editText}>EDIT DETAILS</ThemedText>
         </Pressable>
+
+        {/* ─── My Stores ─── */}
+        <StoreSwitcher />
+
+        {/* ─── Orders Row ─── */}
+        <View style={styles.card}>
+          <View style={styles.cardHeaderRow}>
+            <ThemedText style={styles.cardHeaderTitle}>My Orders</ThemedText>
+            <Pressable
+              style={styles.cardHeaderAction}
+              onPress={() => router.push("/orders")}
+            >
+              <ThemedText style={styles.cardHeaderActionText}>View More</ThemedText>
+              <Ionicons name="chevron-forward" size={14} color={muted} />
+            </Pressable>
+          </View>
+          <View style={styles.ordersGrid}>
+            <OrderStat icon="card-outline" label="Unpaid" onPress={() => router.push("/orders")} />
+            <OrderStat icon="car-outline" label="Processing" onPress={() => router.push("/orders")} />
+            <OrderStat icon="checkmark-done-outline" label="Delivered" onPress={() => router.push("/orders")} />
+            <OrderStat icon="repeat-outline" label="Returns" onPress={() => router.push("/orders")} />
+          </View>
+        </View>
+
+        {/* ─── You May Also Like ─── */}
+{suggestedProducts.length > 0 && (
+  <View style={styles.card}>
+    <View style={styles.cardHeaderRow}>
+      <ThemedText style={styles.cardHeaderTitle}>You May Also Like</ThemedText>
+    </View>
+    <View style={styles.suggestedList}>
+      {suggestedProducts.map((product) => (
         <Pressable
-          onPress={() => {
-            signOut();
-            router.replace("/sign-in");
-          }}
-          style={styles.signOut}
+          key={product._id}
+          style={styles.suggestedRow}
+          onPress={() =>
+            router.push({
+              pathname: "/product/[id]",
+              params: { id: product._id },
+            })
+          }
         >
-          <ThemedText style={styles.signOutText}>SIGN OUT</ThemedText>
+          <Image
+            source={{ uri: apiImageUrl(product.image) }}
+            style={styles.suggestedImage}
+            contentFit="cover"
+          />
+          <View style={styles.suggestedInfo}>
+            <ThemedText style={styles.suggestedName} numberOfLines={2}>
+              {product.title}
+            </ThemedText>
+            <ThemedText style={styles.suggestedPrice}>
+              {product.price > 0 ? `₹${product.price}` : "PRICE ON REQUEST"}
+            </ThemedText>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={muted} />
         </Pressable>
+      ))}
+    </View>
+  </View>
+)}
+
+        {/* ─── My Account ─── */}
+        <View style={styles.listCard}>
+          <ThemedText style={styles.sectionHeading}>My Account</ThemedText>
+          <View style={styles.sectionHeadingRule} />
+          <TextRow label="My Profile" onPress={openMyProfile} />
+          <TextRow label="Delivery Address" onPress={openEditAddress} />
+          <TextRow label="Settings" isLast onPress={openSettings} />
+        </View>
+
+        {/* ─── Help Center ─── */}
+        <View style={styles.listCard}>
+          <ThemedText style={styles.sectionHeading}>Help Center</ThemedText>
+          <View style={styles.sectionHeadingRule} />
+          <TextRow
+            label="Customer Service"
+            onPress={() => Alert.alert("Customer Service", "Coming soon.")}
+          />
+          <TextRow
+            label="Return Policy"
+            onPress={() => Alert.alert("Return Policy", "Coming soon.")}
+          />
+          <TextRow
+            label="Shipping & Delivery"
+            onPress={() => Alert.alert("Shipping & Delivery", "Coming soon.")}
+          />
+          <TextRow label="More" isLast onPress={handleSignOut} />
+        </View>
+
+        {/* ─── About ─── */}
+        <View style={styles.listCard}>
+          <ThemedText style={styles.sectionHeading}>About</ThemedText>
+          <View style={styles.sectionHeadingRule} />
+          <TextRow
+            label="About Us"
+            isLast
+            onPress={() => Alert.alert("About Us", "Coming soon.")}
+          />
+        </View>
+        <ThemedText style={styles.trustFooterText}>
+        Your Trust{"\n"}is Our Duty
+      </ThemedText>
       </ScrollView>
 
-      {/* Address Edit Modal */}
-      <Modal
-        visible={showAddressModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowAddressModal(false)}
+      
+
+      {/* Delivery Address Panel */}
+{/* Delivery Address Panel */}
+<Modal
+  visible={showAddressModal}
+  transparent
+  animationType="none"
+  onRequestClose={() => closePanel(setShowAddressModal, addressSlide)}
+>
+  <Animated.View
+    style={[styles.panelScreen, { transform: [{ translateX: addressSlide }] }]}
+  >
+    <View style={styles.panelHeader}>
+      <Pressable
+        onPress={() => {
+          if (addressPanelMode === "form") {
+            setAddressPanelMode("list");
+          } else {
+            closePanel(setShowAddressModal, addressSlide);
+          }
+        }}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHandle} />
-            <View style={styles.modalHeader}>
-              <ThemedText style={styles.modalTitle}>
-                {hasAddress ? "Edit Address" : "Add Address"}
-              </ThemedText>
-              <Pressable onPress={() => setShowAddressModal(false)}>
-                <ThemedText style={styles.modalClose}>✕</ThemedText>
-              </Pressable>
+        <Ionicons name="arrow-back" size={22} color={ink} />
+      </Pressable>
+      <ThemedText style={styles.panelHeaderTitle}>
+        {addressPanelMode === "list"
+          ? "Saved Addresses"
+          : hasAddress
+            ? "Edit Address"
+            : "Add Address"}
+      </ThemedText>
+      <View style={{ width: 22 }} />
+    </View>
+
+    {addressPanelMode === "list" ? (
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.addressListContent}
+      >
+        <Pressable style={styles.addNewButton} onPress={startAddNewAddress}>
+          <View style={styles.addNewButtonLeft}>
+            <Ionicons name="add" size={18} color="#2E6ADE" />
+            <ThemedText style={styles.addNewButtonText}>Add New</ThemedText>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color="#2E6ADE" />
+        </Pressable>
+
+        {savedAddresses.length > 0 && (
+          <ThemedText style={styles.savedAddressesLabel}>
+            Saved addresses
+          </ThemedText>
+        )}
+
+        {savedAddresses.map((addr, idx) => (
+          <View key={idx} style={styles.savedAddressCard}>
+            <View style={styles.savedAddressIconBox}>
+              <Ionicons name="home" size={20} color={ink} />
             </View>
-            <ScrollView
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={styles.modalForm}
-              keyboardShouldPersistTaps="handled"
-            >
-              <ThemedText style={styles.fieldLabel}>ADDRESS LINE</ThemedText>
-              <TextInput
-                value={addressForm.addressLine}
-                onChangeText={(t) =>
-                  setAddressForm((s) => ({ ...s, addressLine: t }))
-                }
-                placeholder="House no, Street, Area"
-                placeholderTextColor={muted}
-                style={styles.modalInput}
-              />
-              <ThemedText style={styles.fieldLabel}>AREA / LANDMARK</ThemedText>
-              <TextInput
-                value={addressForm.area}
-                onChangeText={(t) =>
-                  setAddressForm((s) => ({ ...s, area: t }))
-                }
-                placeholder="Landmark (Optional)"
-                placeholderTextColor={muted}
-                style={styles.modalInput}
-              />
-              <View style={styles.modalRow}>
-                <View style={styles.modalHalf}>
-                  <ThemedText style={styles.fieldLabel}>CITY</ThemedText>
-                  <TextInput
-                    value={addressForm.city}
-                    onChangeText={(t) =>
-                      setAddressForm((s) => ({ ...s, city: t }))
-                    }
-                    placeholder="City"
-                    placeholderTextColor={muted}
-                    style={styles.modalInput}
-                  />
-                </View>
-                <View style={styles.modalHalf}>
-                  <ThemedText style={styles.fieldLabel}>STATE</ThemedText>
-                  <TextInput
-                    value={addressForm.state}
-                    onChangeText={(t) =>
-                      setAddressForm((s) => ({ ...s, state: t }))
-                    }
-                    placeholder="State"
-                    placeholderTextColor={muted}
-                    style={styles.modalInput}
-                  />
-                </View>
-              </View>
-              <View style={styles.modalRow}>
-                <View style={styles.modalHalf}>
-                  <ThemedText style={styles.fieldLabel}>PINCODE</ThemedText>
-                  <TextInput
-                    value={addressForm.pincode}
-                    onChangeText={(t) =>
-                      setAddressForm((s) => ({ ...s, pincode: t }))
-                    }
-                    placeholder="Pincode"
-                    placeholderTextColor={muted}
-                    keyboardType="number-pad"
-                    maxLength={6}
-                    style={styles.modalInput}
-                  />
-                </View>
-                <View style={styles.modalHalf}>
-                  <ThemedText style={styles.fieldLabel}>COUNTRY</ThemedText>
-                  <TextInput
-                    value={addressForm.country}
-                    onChangeText={(t) =>
-                      setAddressForm((s) => ({ ...s, country: t }))
-                    }
-                    placeholder="Country"
-                    placeholderTextColor={muted}
-                    style={styles.modalInput}
-                  />
-                </View>
-              </View>
-              <Pressable
-                style={[styles.saveButton, saving && { opacity: 0.5 }]}
-                disabled={saving}
-                onPress={saveAddress}
-              >
-                <ThemedText style={styles.saveText}>
-                  {saving ? "SAVING..." : "SAVE ADDRESS"}
+            <View style={styles.savedAddressBody}>
+              <ThemedText style={styles.savedAddressName} numberOfLines={1}>
+                {addr.fullName || "Saved Address"}
+              </ThemedText>
+              <ThemedText style={styles.savedAddressLine} numberOfLines={2}>
+                {addr.addressLine}
+                {addr.area ? `, ${addr.area}` : ""}, {addr.city}
+              </ThemedText>
+              <View style={styles.savedAddressPhoneRow}>
+                <Ionicons name="call-outline" size={12} color={muted} />
+                <ThemedText style={styles.savedAddressPhone}>
+                  {addr.phone}
                 </ThemedText>
-              </Pressable>
-            </ScrollView>
+              </View>
+            </View>
+            <Pressable
+              style={styles.savedAddressMenuBtn}
+              onPress={() => handleAddressOptions(addr)}
+            >
+              <Ionicons name="ellipsis-vertical" size={18} color={muted} />
+            </Pressable>
+          </View>
+        ))}
+
+        {savedAddresses.length === 0 && (
+          <ThemedText style={styles.noAddressesText}>
+            No saved addresses yet.
+          </ThemedText>
+        )}
+      </ScrollView>
+    ) : (
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.modalForm}
+        keyboardShouldPersistTaps="handled"
+      >
+        <ThemedText style={styles.fieldLabel}>ADDRESS LINE</ThemedText>
+        <TextInput
+          value={addressForm.addressLine}
+          onChangeText={(t) => setAddressForm((s) => ({ ...s, addressLine: t }))}
+          placeholder="House no, Street, Area"
+          placeholderTextColor={muted}
+          style={styles.modalInput}
+        />
+        <ThemedText style={styles.fieldLabel}>AREA / LANDMARK</ThemedText>
+        <TextInput
+          value={addressForm.area}
+          onChangeText={(t) => setAddressForm((s) => ({ ...s, area: t }))}
+          placeholder="Landmark (Optional)"
+          placeholderTextColor={muted}
+          style={styles.modalInput}
+        />
+        <View style={styles.modalRow}>
+          <View style={styles.modalHalf}>
+            <ThemedText style={styles.fieldLabel}>CITY</ThemedText>
+            <TextInput
+              value={addressForm.city}
+              onChangeText={(t) => setAddressForm((s) => ({ ...s, city: t }))}
+              placeholder="City"
+              placeholderTextColor={muted}
+              style={styles.modalInput}
+            />
+          </View>
+          <View style={styles.modalHalf}>
+            <ThemedText style={styles.fieldLabel}>STATE</ThemedText>
+            <TextInput
+              value={addressForm.state}
+              onChangeText={(t) => setAddressForm((s) => ({ ...s, state: t }))}
+              placeholder="State"
+              placeholderTextColor={muted}
+              style={styles.modalInput}
+            />
           </View>
         </View>
-      </Modal>
+        <View style={styles.modalRow}>
+          <View style={styles.modalHalf}>
+            <ThemedText style={styles.fieldLabel}>PINCODE</ThemedText>
+            <TextInput
+              value={addressForm.pincode}
+              onChangeText={(t) => setAddressForm((s) => ({ ...s, pincode: t }))}
+              placeholder="Pincode"
+              placeholderTextColor={muted}
+              keyboardType="number-pad"
+              maxLength={6}
+              style={styles.modalInput}
+            />
+          </View>
+          <View style={styles.modalHalf}>
+            <ThemedText style={styles.fieldLabel}>COUNTRY</ThemedText>
+            <TextInput
+              value={addressForm.country}
+              onChangeText={(t) => setAddressForm((s) => ({ ...s, country: t }))}
+              placeholder="Country"
+              placeholderTextColor={muted}
+              style={styles.modalInput}
+            />
+          </View>
+        </View>
+        <Pressable
+          style={[styles.saveButton, saving && { opacity: 0.5 }]}
+          disabled={saving}
+          onPress={saveAddress}
+        >
+          <ThemedText style={styles.saveText}>
+            {saving ? "SAVING..." : "SAVE ADDRESS"}
+          </ThemedText>
+        </Pressable>
+      </ScrollView>
+    )}
+  </Animated.View>
+</Modal>
+
+{/* My Profile Panel */}
+<Modal
+  visible={showProfileModal}
+  transparent
+  animationType="none"
+  onRequestClose={() => closePanel(setShowProfileModal, profileSlide)}
+>
+  <Animated.View
+    style={[styles.panelScreen, { transform: [{ translateX: profileSlide }] }]}
+  >
+    <View style={styles.panelHeader}>
+      <Pressable onPress={() => closePanel(setShowProfileModal, profileSlide)}>
+        <Ionicons name="arrow-back" size={22} color={ink} />
+      </Pressable>
+      <ThemedText style={styles.panelHeaderTitle}>My Profile</ThemedText>
+      <View style={{ width: 22 }} />
+    </View>
+    <ScrollView contentContainerStyle={styles.modalForm}>
+      <ThemedText style={styles.fieldLabel}>NAME</ThemedText>
+      <View style={styles.readOnlyField}>
+        <ThemedText style={styles.readOnlyText}>{fullName}</ThemedText>
+      </View>
+      <ThemedText style={styles.fieldLabel}>EMAIL</ThemedText>
+      <View style={styles.readOnlyField}>
+        <ThemedText style={styles.readOnlyText}>
+          {user?.email ?? "Not available"}
+        </ThemedText>
+      </View>
+      <ThemedText style={styles.fieldLabel}>PHONE</ThemedText>
+      <View style={styles.readOnlyField}>
+        <ThemedText style={styles.readOnlyText}>
+          {user?.phone ?? "Not available"}
+        </ThemedText>
+      </View>
+      <ThemedText style={styles.fieldLabel}>ROLE</ThemedText>
+      <View style={styles.readOnlyField}>
+        <ThemedText style={styles.readOnlyText}>
+          {user?.role ?? "Customer"}
+        </ThemedText>
+      </View>
+    </ScrollView>
+  </Animated.View>
+</Modal>
+
+{/* Settings Panel */}
+<Modal
+  visible={showSettingsModal}
+  transparent
+  animationType="none"
+  onRequestClose={() => closePanel(setShowSettingsModal, settingsSlide)}
+>
+  <Animated.View
+    style={[styles.panelScreen, { transform: [{ translateX: settingsSlide }] }]}
+  >
+    <View style={styles.panelHeader}>
+      <Pressable onPress={() => closePanel(setShowSettingsModal, settingsSlide)}>
+        <Ionicons name="arrow-back" size={22} color={ink} />
+      </Pressable>
+      <ThemedText style={styles.panelHeaderTitle}>Settings</ThemedText>
+      <View style={{ width: 22 }} />
+    </View>
+    <ScrollView contentContainerStyle={styles.modalForm}>
+      <Pressable
+        style={styles.settingsRow}
+        onPress={() => {
+          closePanel(setShowSettingsModal, settingsSlide);
+          handleSignOut();
+        }}
+      >
+        <ThemedText style={styles.settingsRowText}>Sign Out</ThemedText>
+        <Ionicons name="log-out-outline" size={18} color="#E8503C" />
+      </Pressable>
+    </ScrollView>
+  </Animated.View>
+</Modal>
     </SafeAreaView>
   );
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
+function OrderStat({
+  icon,
+  label,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  onPress: () => void;
+}) {
   return (
-    <View style={styles.detail}>
-      <ThemedText style={styles.label}>{label}</ThemedText>
-      <ThemedText style={styles.value}>{value}</ThemedText>
-    </View>
+    <Pressable style={styles.orderStatItem} onPress={onPress}>
+      <Ionicons name={icon} size={22} color={ink} />
+      <ThemedText style={styles.orderStatLabel}>{label}</ThemedText>
+    </Pressable>
+  );
+}
+
+function StatItem({
+  value,
+  label,
+  onPress,
+}: {
+  value: string;
+  label: string;
+  onPress?: () => void;
+}) {
+  return (
+    <Pressable style={styles.statItem} onPress={onPress} disabled={!onPress}>
+      <ThemedText style={styles.statValue}>{value}</ThemedText>
+      <ThemedText style={styles.statLabel}>{label}</ThemedText>
+    </Pressable>
+  );
+}
+
+function TextRow({
+  label,
+  onPress,
+  isLast,
+}: {
+  label: string;
+  onPress: () => void;
+  isLast?: boolean;
+}) {
+  return (
+    <Pressable
+      style={[styles.textRow, !isLast && styles.textRowDivider]}
+      onPress={onPress}
+    >
+      <ThemedText style={styles.textRowLabel}>{label}</ThemedText>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#F4F4ED" },
-  content: { padding: 24, paddingBottom: 48 },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-end",
-    marginBottom: 36,
-  },
-  eyebrow: {
-    color: muted,
-    fontSize: 10,
-    letterSpacing: 1.8,
-    fontWeight: "700",
-    marginBottom: 14,
-  },
-  title: {
-    color: ink,
-    fontSize: 42,
-    lineHeight: 44,
-    fontWeight: "800",
-    letterSpacing: -1.4,
-  },
-  close: {
-    color: ink,
-    fontSize: 13,
-    fontWeight: "800",
-    textTransform: "uppercase",
-    letterSpacing: 1,
-  },
-  identity: {
+  screen: { flex: 1, backgroundColor: screenBg },
+  content: { paddingHorizontal: 16, paddingBottom: 40 },
+
+  /* ─── Top Bar ─── */
+  topBar: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 16,
-    paddingBottom: 28,
-    borderBottomWidth: 1,
-    borderBottomColor: border,
+    paddingTop: 8,
+    paddingBottom: 4,
+    gap: 10,
   },
-  avatar: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: ink,
+  topBarBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
+    position: "relative",
   },
-  avatarText: { color: "#F4F4ED", fontSize: 20, fontWeight: "800" },
-  name: { color: ink, fontSize: 21, fontWeight: "800" },
-  email: { color: muted, fontSize: 14, marginTop: 4 },
-  details: {
-    backgroundColor: surface,
-    borderRadius: 12,
-    padding: 20,
-    marginTop: 24,
-    gap: 20,
+  notifDot: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#E8503C",
   },
-  detail: { gap: 5 },
-  label: { color: muted, fontSize: 10, letterSpacing: 1.6, fontWeight: "700" },
-  value: { color: ink, fontSize: 16, lineHeight: 22, fontWeight: "600" },
 
-  // Address section
-  addressSection: {
-    marginTop: 24,
-  },
-  addressHeader: {
+  /* ─── Identity Row ─── */
+  identityRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 12,
+    alignItems: "flex-start",
+    gap: 14,
+    marginTop: 12,
+    marginBottom: 18,
   },
-  addressTitle: {
+  avatar: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: accent,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 3,
+    borderColor: "#FFFFFF",
+  },
+  avatarText: { color: "#FFFFFF", fontSize: 20, fontWeight: "800" },
+  identityText: { flex: 1, paddingTop: 4 },
+  identityPrimary: {
+    color: ink,
+    fontSize: 17,
+    fontWeight: "700",
+  },
+  identitySecondary: {
+    color: muted,
+    fontSize: 13,
+    marginTop: 3,
+  },
+
+  /* ─── Rewards Card ─── */
+  rewardsCard: {
+    backgroundColor: accent,
+    borderRadius: 16,
+    padding: 18,
+    marginBottom: 16,
+    overflow: "hidden",
+  },
+  rewardsHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  rewardsTitle: {
     color: ink,
     fontSize: 18,
     fontWeight: "800",
   },
-  addressEditLink: {
-    color: "#4A7C59",
-    fontSize: 11,
-    fontWeight: "900",
-    letterSpacing: 1.5,
-  },
-  addressCard: {
-    backgroundColor: surface,
-    borderRadius: 12,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: border,
-    gap: 4,
-  },
-  addressLine: {
-    color: ink,
-    fontSize: 15,
-    fontWeight: "700",
-    lineHeight: 22,
-  },
-  addressSub: {
-    color: muted,
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  addressCountry: {
-    color: muted,
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 0.5,
-    marginTop: 4,
-  },
-  addAddressCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 12,
-    padding: 24,
-    borderWidth: 1.5,
-    borderColor: border,
-    borderStyle: "dashed",
+  rewardsViewAll: {
+    flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 2,
   },
-  addAddressPlus: {
-    color: "#4A7C59",
-    fontSize: 28,
-    fontWeight: "300",
-    marginBottom: 4,
+  rewardsViewAllText: {
+    color: ink,
+    fontSize: 13,
+    fontWeight: "600",
   },
-  addAddressText: {
+  rewardsTier: {
     color: ink,
     fontSize: 14,
-    fontWeight: "800",
+    fontWeight: "600",
+    marginTop: 18,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(0,0,0,0.15)",
   },
-  addAddressSub: {
-    color: muted,
-    fontSize: 12,
+  rewardsDivider: {
+    height: 12,
   },
-
-  editButton: {
-    height: 52,
-    borderWidth: 1,
-    borderColor: ink,
-    borderRadius: 3,
+  rewardsBadgeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  rewardsBadgeIcon: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: ink,
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 24,
   },
-  editText: { color: ink, fontSize: 12, fontWeight: "800", letterSpacing: 2 },
-  signOut: { alignSelf: "center", marginTop: 24 },
-  signOutText: {
-    color: "#B0523E",
-    fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 1.8,
+  rewardsBadgeText: {
+    color: ink,
+    fontSize: 13,
+    fontWeight: "700",
   },
 
-  // Modal styles
+  /* ─── Generic Card ─── */
+  card: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 16,
+    padding: 18,
+    marginBottom: 16,
+  },
+  cardHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 16,
+  },
+  cardHeaderTitle: {
+    color: ink,
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  cardHeaderAction: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+  },
+  cardHeaderActionText: {
+    color: muted,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+
+  /* ─── Orders Grid ─── */
+  ordersGrid: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  orderStatItem: {
+    alignItems: "center",
+    gap: 8,
+    flex: 1,
+  },
+  orderStatLabel: {
+    color: ink,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+
+  /* ─── Stats Row ─── */
+  statsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  statItem: {
+    alignItems: "center",
+    flex: 1,
+  },
+  statValue: {
+    color: ink,
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  statLabel: {
+    color: muted,
+    fontSize: 12,
+    fontWeight: "500",
+    marginTop: 4,
+  },
+
+  /* ─── List Cards ─── */
+  listCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    marginBottom: 16,
+  },
+  sectionHeading: {
+    color: ink,
+    fontSize: 15,
+    fontWeight: "800",
+    marginBottom: 10,
+  },
+  sectionHeadingRule: {
+    height: 2,
+    backgroundColor: ink,
+    width: 60,
+    marginBottom: 4,
+  },
+  textRow: {
+    paddingVertical: 16,
+  },
+  textRowDivider: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#EFEFEF",
+  },
+  textRowLabel: {
+    color: ink,
+    fontSize: 15,
+    fontWeight: "500",
+  },
+
+  // Modal styles (unchanged)
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.4)",
@@ -494,7 +967,7 @@ const styles = StyleSheet.create({
   modalHandle: {
     width: 40,
     height: 5,
-    backgroundColor: border,
+    backgroundColor: "#D7E0D6",
     borderRadius: 3,
     alignSelf: "center",
     marginTop: 10,
@@ -559,4 +1032,172 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     fontWeight: "800",
   },
+  panelScreen: {
+  flex: 1,
+  backgroundColor: "#FFFFFF",
+},
+panelHeader: {
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-between",
+  paddingHorizontal: 20,
+  paddingTop: 56,
+  paddingBottom: 16,
+  borderBottomWidth: 1,
+  borderBottomColor: "#EFEFEF",
+},
+panelHeaderTitle: {
+  color: ink,
+  fontSize: 18,
+  fontWeight: "800",
+},
+readOnlyField: {
+  backgroundColor: field,
+  borderRadius: 3,
+  paddingHorizontal: 16,
+  paddingVertical: 14,
+  marginBottom: 4,
+},
+readOnlyText: {
+  color: ink,
+  fontSize: 14,
+  fontWeight: "600",
+},
+settingsRow: {
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-between",
+  paddingVertical: 16,
+  borderBottomWidth: 1,
+  borderBottomColor: "#EFEFEF",
+},
+settingsRowText: {
+  color: "#E8503C",
+  fontSize: 15,
+  fontWeight: "700",
+},
+addressListContent: {
+  paddingHorizontal: 20,
+  paddingTop: 16,
+  paddingBottom: 32,
+},
+addNewButton: {
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-between",
+  backgroundColor: "#EAF2FE",
+  borderRadius: 14,
+  paddingHorizontal: 16,
+  paddingVertical: 14,
+  marginBottom: 20,
+},
+addNewButtonLeft: {
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 6,
+},
+addNewButtonText: {
+  color: "#2E6ADE",
+  fontSize: 15,
+  fontWeight: "700",
+},
+savedAddressesLabel: {
+  color: muted,
+  fontSize: 13,
+  fontWeight: "600",
+  marginBottom: 10,
+},
+savedAddressCard: {
+  flexDirection: "row",
+  alignItems: "flex-start",
+  gap: 12,
+  borderWidth: 1,
+  borderColor: "#EFEFEF",
+  borderRadius: 14,
+  padding: 14,
+  marginBottom: 12,
+},
+savedAddressIconBox: {
+  width: 40,
+  height: 40,
+  borderRadius: 10,
+  backgroundColor: field,
+  alignItems: "center",
+  justifyContent: "center",
+},
+savedAddressBody: {
+  flex: 1,
+},
+savedAddressName: {
+  color: ink,
+  fontSize: 15,
+  fontWeight: "700",
+},
+savedAddressLine: {
+  color: muted,
+  fontSize: 13,
+  lineHeight: 18,
+  marginTop: 4,
+},
+savedAddressPhoneRow: {
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 5,
+  marginTop: 6,
+},
+savedAddressPhone: {
+  color: ink,
+  fontSize: 13,
+  fontWeight: "700",
+},
+savedAddressMenuBtn: {
+  padding: 4,
+},
+noAddressesText: {
+  color: muted,
+  fontSize: 13,
+  textAlign: "center",
+  marginTop: 20,
+},
+suggestedList: {
+  marginTop: 4,
+},
+suggestedRow: {
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 12,
+  paddingVertical: 12,
+  borderBottomWidth: 1,
+  borderBottomColor: "#F0F0F0",
+},
+suggestedImage: {
+  width: 56,
+  height: 56,
+  borderRadius: 12,
+  backgroundColor: field,
+},
+suggestedInfo: {
+  flex: 1,
+},
+suggestedName: {
+  color: ink,
+  fontSize: 14,
+  fontWeight: "700",
+  marginBottom: 4,
+},
+suggestedPrice: {
+  color: ink,
+  fontSize: 14,
+  fontWeight: "800",
+},
+trustFooterText: {
+  color: "#dddbdb",
+  fontSize: 40,
+  fontWeight: "700",
+  textAlign: "left",
+  marginTop: 8,
+  marginBottom: 8,
+  paddingTop: 20,
+  lineHeight: 46,
+},
 });

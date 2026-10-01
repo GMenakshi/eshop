@@ -8,12 +8,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { Alert } from "react-native";
 
 import { type HomeProduct } from "@/app/(tabs)/index";
 import { useAuth } from "@/context/auth-context";
 
-const API_BASE = process.env.EXPO_PUBLIC_API_BASE_URL;
-
+import { API_BASE_URL } from "@/lib/api";
 export type WishlistItem = HomeProduct & { isAvailable?: boolean };
 
 type WishlistContextValue = {
@@ -26,25 +26,40 @@ type WishlistContextValue = {
 
 const WishlistContext = createContext<WishlistContextValue | null>(null);
 
-// server response -> flat list shaped like HomeProduct
+const idOf = (value: any): string =>
+  String(value?._id ?? value?.id ?? value ?? "");
+
+// Accepts both shapes: { stores: [{ store, items }] } and { items: [...] }
 function flatten(wishlist: any): WishlistItem[] {
-  const stores = wishlist?.stores ?? [];
-  return stores.flatMap((group: any) =>
-    (group.items ?? []).map(
-      (item: any) =>
-        ({
-          id: String(item.productId),
-          name: item.name ?? "Product unavailable",
-          brand: group.store?.storeName ?? "",
-          price: Number(item.minOfferPrice) || 0,
-          category: "",
-          image: item.image ?? "",
-          description: "",
-          unit: item.unit ?? undefined,
-          isAvailable: item.isAvailable,
-        }) as WishlistItem,
-    ),
-  );
+  if (!wishlist) return [];
+
+  const toItem = (item: any, storeName = ""): WishlistItem => {
+    const product =
+      item.productId && typeof item.productId === "object" ? item.productId : null;
+    return {
+      id: idOf(item.productId ?? item.product),
+      name: item.name ?? product?.title ?? "Product unavailable",
+      brand: storeName,
+      price: Number(item.minOfferPrice ?? item.price ?? product?.price) || 0,
+      category: "",
+      image: item.image ?? product?.image ?? product?.images?.[0] ?? "",
+      description: "",
+      unit: item.unit ?? product?.unit ?? undefined,
+      isAvailable: item.isAvailable,
+    } as WishlistItem;
+  };
+
+  if (Array.isArray(wishlist.stores)) {
+    return wishlist.stores.flatMap((group: any) =>
+      (group.items ?? []).map((item: any) =>
+        toItem(item, group.store?.storeName ?? ""),
+      ),
+    );
+  }
+  if (Array.isArray(wishlist.items)) {
+    return wishlist.items.map((item: any) => toItem(item));
+  }
+  return [];
 }
 
 export function WishlistProvider({ children }: { children: ReactNode }) {
@@ -52,42 +67,40 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<WishlistItem[]>([]);
   const [loading, setLoading] = useState(false);
 
-
-  
-const request = useCallback(
+  const request = useCallback(
   async (path: string, init?: RequestInit) => {
-    const url = `${API_BASE}/wishlist${path}`;
+    const url = `${API_BASE_URL}/wishlist${path}`;
     const res = await fetch(url, {
       ...init,
       headers: {
         "Content-Type": "application/json",
+        "x-access-token": token ?? "",
         Authorization: `Bearer ${token}`,
       },
     });
     const body = await res.json().catch(() => null);
-    console.log("WISHLIST", init?.method ?? "GET", url, res.status, body);
+    console.log("WISHLIST", init?.method ?? "GET", url, res.status, JSON.stringify(body)?.slice(0, 600));
     if (!res.ok) throw new Error(body?.message ?? `HTTP ${res.status}`);
     return body;
   },
   [token],
 );
 
-const refresh = useCallback(async () => {
-  console.log("WISHLIST refresh, token present:", Boolean(token));
-  if (!token) {
-    setItems([]);
-    return;
-  }
-  setLoading(true);
-  try {
-    const data = await request("");
-    setItems(flatten(data.wishlist));
-  } catch (e) {
-    console.log("WISHLIST refresh failed:", e);
-  } finally {
-    setLoading(false);
-  }
-}, [token, request]);
+  const refresh = useCallback(async () => {
+    if (!token) {
+      setItems([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await request("");
+      setItems(flatten(data?.wishlist ?? data));
+    } catch (e) {
+      console.log("WISHLIST refresh failed:", e);
+    } finally {
+      setLoading(false);
+    }
+  }, [token, request]);
 
   useEffect(() => {
     refresh();
@@ -106,16 +119,21 @@ const refresh = useCallback(async () => {
           : [product, ...current],
       );
       try {
-        const data = await request("/toggle", {
+        await request("/toggle", {
           method: "POST",
           body: JSON.stringify({ productId: product.id }),
         });
-        setItems(flatten(data.wishlist));
-      } catch {
+        await refresh();
+      } catch (e) {
+        console.log("WISHLIST toggle failed:", e);
         setItems(previous);
+        Alert.alert(
+          "Wishlist",
+          e instanceof Error ? e.message : "Could not update wishlist.",
+        );
       }
     },
-    [token, items, request],
+    [token, items, request, refresh],
   );
 
   const value = useMemo(
@@ -130,9 +148,7 @@ const refresh = useCallback(async () => {
   );
 
   return (
-    <WishlistContext.Provider value={value}>
-      {children}
-    </WishlistContext.Provider>
+    <WishlistContext.Provider value={value}>{children}</WishlistContext.Provider>
   );
 }
 
