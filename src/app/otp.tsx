@@ -1,17 +1,20 @@
+import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import { useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Pressable,
-    StyleSheet,
-    TextInput,
-    View,
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { ThemedText } from "@/components/themed-text";
+import { useAuth } from "@/context/auth-context";
 import { api } from "@/lib/api";
+import { takePendingSignup } from "@/lib/pending-signup";
 import { goBackOrHome } from "@/lib/navigation";
 
 const ink = "#17211D";
@@ -21,6 +24,7 @@ export default function OtpScreen() {
   const { email = "" } = useLocalSearchParams<{ email?: string }>();
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
+  const { signIn } = useAuth();
 
   const verify = async () => {
     if (!email || code.length < 4)
@@ -28,6 +32,16 @@ export default function OtpScreen() {
     setLoading(true);
     try {
       await api.verifyOtp(email, code);
+      const pending = takePendingSignup(email);
+      if (pending) {
+        try {
+          await signIn(pending.email, pending.password);
+          router.replace("/(tabs)");
+          return;
+        } catch {
+          // Auto-login failed, so fall back to the normal sign-in page
+        }
+      }
       router.replace({ pathname: "/sign-in", params: { email } });
     } catch (error) {
       Alert.alert(
@@ -47,36 +61,52 @@ export default function OtpScreen() {
           onPress={goBackOrHome}
           style={styles.backButton}
         >
-          <ThemedText style={styles.backText}>Back</ThemedText>
+          <Ionicons name="arrow-back" size={21} color="#C7C7C7" />
         </Pressable>
-        <ThemedText style={styles.eyebrow}>VERIFY YOUR ACCOUNT</ThemedText>
-        <ThemedText style={styles.title}>One last{`\n`}check.</ThemedText>
+        <ThemedText style={styles.title}>Verification Code</ThemedText>
         <ThemedText style={styles.subtitle}>
-          Enter the six-digit code we sent to your email address.
+          We have sent the verification code to your email address
         </ThemedText>
-        <TextInput
-          autoFocus
-          keyboardType="number-pad"
-          maxLength={6}
-          placeholder="000000"
-          placeholderTextColor="#9AA49C"
-          style={styles.codeInput}
-          value={code}
-          onChangeText={setCode}
-        />
+
+        <View style={styles.codeRow}>
+          {Array.from({ length: 6 }, (_, index) => (
+            <View
+              key={index}
+              style={[
+                styles.codeCell,
+                index === Math.min(code.length, 5) && styles.codeCellActive,
+              ]}
+              pointerEvents="none"
+            >
+              <ThemedText style={styles.codeDigit}>
+                {code[index] ?? ""}
+              </ThemedText>
+            </View>
+          ))}
+          <TextInput
+            autoFocus
+            keyboardType="number-pad"
+            maxLength={6}
+            textContentType="oneTimeCode"
+            accessibilityLabel="Verification code"
+            caretHidden
+            selectionColor="transparent"
+            style={styles.codeInputOverlay}
+            value={code}
+            onChangeText={setCode}
+          />
+        </View>
+
         <Pressable
           disabled={loading}
           onPress={verify}
           style={styles.primaryButton}
         >
           {loading ? (
-            <ActivityIndicator color="#F4F4ED" />
+            <ActivityIndicator color="#FFFFFF" />
           ) : (
-            <ThemedText style={styles.primaryText}>VERIFY CODE</ThemedText>
+            <ThemedText style={styles.primaryText}>Confirm</ThemedText>
           )}
-        </Pressable>
-        <Pressable onPress={() => setCode("")} style={styles.resend}>
-          <ThemedText style={styles.resendText}>Resend code</ThemedText>
         </Pressable>
       </View>
     </SafeAreaView>
@@ -84,62 +114,86 @@ export default function OtpScreen() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#F4F4ED" },
-  content: { flex: 1, padding: 24 },
-  backButton: { alignSelf: "flex-start", marginBottom: 42 },
-  backText: {
-    color: ink,
-    fontSize: 13,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 1,
+  screen: { flex: 1, backgroundColor: "#F4DCCB" },
+  content: {
+    flex: 1,
+    marginHorizontal: 1,
+    paddingHorizontal: 27,
+    paddingTop: 10,
+    backgroundColor: "#FFFFFF",
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    overflow: "hidden",
   },
-  eyebrow: {
-    color: muted,
-    fontSize: 10,
-    letterSpacing: 1.8,
-    fontWeight: "700",
-    marginBottom: 18,
+  backButton: {
+    width: 32,
+    height: 32,
+    justifyContent: "center",
+    alignItems: "flex-start",
   },
   title: {
-    color: ink,
-    fontSize: 44,
-    lineHeight: 43,
+    color: "#333333",
+    fontSize: 16,
     fontWeight: "800",
-    letterSpacing: -1.4,
+    marginTop: 32,
   },
   subtitle: {
-    color: muted,
-    fontSize: 15,
-    lineHeight: 22,
-    marginTop: 18,
-    maxWidth: 310,
+    color: "#A8A8A8",
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 10,
+    maxWidth: 270,
   },
-  codeInput: {
-    height: 64,
-    borderBottomWidth: 1,
-    borderBottomColor: "#B9C7B9",
-    color: ink,
-    fontSize: 32,
-    fontWeight: "700",
-    letterSpacing: 12,
-    marginTop: 42,
-    paddingHorizontal: 8,
+  codeRow: {
+    position: "relative",
+    width: "100%",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 9,
+    marginTop: 32,
   },
-  primaryButton: {
-    height: 52,
-    backgroundColor: ink,
-    borderRadius: 3,
+  codeCell: {
+    flex: 1,
+    maxWidth: 54,
+    height: 51,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: "#E3E3E3",
+    backgroundColor: "#FFFFFF",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 28,
+  },
+  codeCellActive: {
+    borderColor: "#FF925D",
+  },
+  codeDigit: {
+    color: "#797979",
+    fontSize: 17,
+    fontWeight: "700",
+  },
+  codeInputOverlay: {
+    ...StyleSheet.absoluteFill,
+    opacity: 0.02,
+    color: "transparent",
+    fontSize: 1,
+    padding: 0,
+  },
+  primaryButton: {
+    height: 51,
+    backgroundColor: "#FF8248",
+    borderRadius: 28,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 40,
+    shadowColor: "#E96836",
+    shadowOpacity: 0.18,
+    shadowRadius: 9,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
   },
   primaryText: {
-    color: "#F4F4ED",
-    fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 2.2,
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "700",
   },
-  resend: { alignSelf: "center", marginTop: 24 },
-  resendText: { color: ink, fontSize: 14, fontWeight: "700" },
 });

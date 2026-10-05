@@ -18,11 +18,12 @@ import { useAuth } from "@/context/auth-context";
 import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
 
-const ink = "#17211D";
+const ink = "#211e17";
 const muted = "#9AA39B";
 const border = "#ECECE6";
 const orange = "#F2733B";
 const pillBg = "#F1F1EC";
+const accent = "rgba(245, 185, 121, 1)";
 
 type OrderRecord = Record<string, unknown>;
 type Decision = "APPROVED" | "REJECTED";
@@ -41,6 +42,7 @@ export type OrderLine = {
   weight?: string | number;
   decision?: Decision;
   remarks?: string;
+  cancelledBy?: string;
 };
 export type OrderView = {
   id: string;
@@ -59,6 +61,7 @@ export type OrderView = {
   orderNumber?: string;
   estimatedDelivery?: string;
   notes?: string;
+  cancelledBy?: string;
 };
 
 function recordsFromPayload(payload: unknown): OrderRecord[] {
@@ -168,10 +171,27 @@ function toOrderView(
     .map((value) => lineFromValue(value, products))
     .filter((line): line is OrderLine => Boolean(line));
   const orderDecision = readDecision(record);
+  const orderStatus = String(record.status ?? "").toUpperCase();
+  const history = Array.isArray(record.statusHistory)
+    ? (record.statusHistory as Record<string, unknown>[])
+    : [];
+  const confirmedNote = [...history]
+    .reverse()
+    .find((h) => String(h?.status).toUpperCase() === "CONFIRMED")?.note;
+  const backendRemarks =
+    orderStatus === "CANCELLED"
+      ? textValue(record.cancelReason, "").trim()
+      : orderStatus === "CONFIRMED"
+        ? textValue(confirmedNote, "").trim()
+        : "";
+  const cancelledBy =
+    typeof record.cancelledBy === "string" ? record.cancelledBy : undefined;
   const lines = rawLines.map((line) => ({
     ...line,
     decision: line.decision ?? orderDecision.decision,
-    remarks: line.remarks ?? orderDecision.remarks,
+    remarks:
+      line.remarks ?? orderDecision.remarks ?? (backendRemarks || undefined),
+    cancelledBy,
   }));
   const dateValue = record.createdAt ?? record.orderDate ?? record.date;
   const date = dateValue
@@ -259,20 +279,22 @@ function toOrderView(
       "",
     ),
     notes: textValue(record.notes ?? record.remarks ?? record?.orderNotes, ""),
+    cancelledBy,
   };
 }
 
 // Maps the raw backend order status into one of the three tabs shown in the UI.
-function statusGroup(status: string): StatusGroup {
+function statusGroup(status: string, cancelledBy?: string): StatusGroup {
   const s = status.toUpperCase();
-  if (s === "APPROVED") return "APPROVED";
+  if (s === "APPROVED" || s === "CONFIRMED") return "APPROVED";
   if (s === "REJECTED") return "REJECTED";
-  if (s === "CANCELLED" || s === "CANCELED") return "CANCELED";
+  if (s === "CANCELLED" || s === "CANCELED")
+    return cancelledBy === "STORE" ? "REJECTED" : "CANCELED";
   return "PROCESSING";
 }
 
 const lineGroup = (order: OrderView, line: OrderLine): StatusGroup =>
-  line.decision ?? statusGroup(order.status);
+  line.decision ?? statusGroup(order.status, order.cancelledBy);
 
 const TABS: { key: StatusGroup; label: string }[] = [
   { key: "PROCESSING", label: "Processing" },
@@ -369,7 +391,7 @@ export default function OrdersScreen() {
 
   if (!targetOrder) return;
 
-  setActiveTab(statusGroup(targetOrder.status));
+  setActiveTab(statusGroup(targetOrder.status, targetOrder.cancelledBy));
 }, [id, orders]);
 
   const filteredOrders = useMemo(
@@ -496,7 +518,18 @@ function OrderCard({
         const group = lineGroup(order, line);
         const canCancel = group === "PROCESSING";
         return (
-          <View key={`${order.id}-line-${idx}`} style={styles.card}>
+          <Pressable
+            key={`${order.id}-line-${idx}`}
+            style={styles.card}
+            disabled={!line.productId}
+            onPress={() =>
+              line.productId &&
+              router.push({
+                pathname: "/product/[id]",
+                params: { id: line.productId },
+              })
+            }
+          >
             <View style={styles.cardRow}>
               <View style={styles.thumbFrame}>
                 {lineImage ? (
@@ -542,7 +575,8 @@ function OrderCard({
               </View>
             </View>
 
-            {(group === "APPROVED" || group === "REJECTED") && (
+            {(group === "APPROVED" || group === "REJECTED") &&
+              !!line.remarks && (
               <View
                 style={[
                   styles.remarksBox,
@@ -557,12 +591,14 @@ function OrderCard({
                     { color: group === "APPROVED" ? "#2E7D4F" : "#B84A36" },
                   ]}
                 >
-                  {group === "APPROVED" ? "Approved" : "Rejected"}
+                  {group === "APPROVED"
+                    ? "Approved"
+                    : line.cancelledBy === "USER"
+                      ? "Cancelled by you"
+                      : "Rejected"}
                 </ThemedText>
                 <ThemedText style={styles.remarksText}>
-                  {line.remarks
-                    ? `Remarks: ${line.remarks}`
-                    : "No remarks provided."}
+                  Remarks: {line.remarks}
                 </ThemedText>
               </View>
             )}
@@ -592,7 +628,7 @@ function OrderCard({
                 </ThemedText>
               </View>
             )}
-          </View>
+          </Pressable>
         );
       })}
     </View>
@@ -636,7 +672,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   tabPillActive: {
-    backgroundColor: ink,
+    backgroundColor: accent,
   },
   tabLabel: {
     color: muted,
@@ -644,7 +680,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   tabLabelActive: {
-    color: "#FFFFFF",
+    color: ink,
   },
   content: { padding: 16, paddingBottom: 130 },
   orderList: { gap: 12 },
@@ -753,15 +789,15 @@ const styles = StyleSheet.create({
   panelTitle: { color: ink, fontSize: 18, fontWeight: "800" },
   panelText: { color: muted, fontSize: 14, lineHeight: 21, marginTop: 7 },
   primary: {
-    backgroundColor: ink,
+    backgroundColor: accent,
     height: 48,
-    borderRadius: 3,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
     marginTop: 16,
   },
   primaryText: {
-    color: "#F4F4ED",
+    color: ink,
     fontSize: 11,
     letterSpacing: 2,
     fontWeight: "900",

@@ -17,6 +17,11 @@ type AuthContextValue = {
   user: ApiUser | null;
   ready: boolean;
   signIn: (email: string, password: string) => Promise<void>;
+  applySession: (
+    token: string,
+    user: Partial<ApiUser>,
+    fallbackEmail?: string,
+  ) => Promise<void>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
 };
@@ -80,6 +85,33 @@ export function AuthProvider({ children }: PropsWithChildren) {
     ]);
   }, []);
 
+  const applySession = useCallback(
+    async (
+      newToken: string,
+      payload: Partial<ApiUser>,
+      fallbackEmail = "",
+    ) => {
+      const normalizedUser: ApiUser = {
+        _id: payload._id ?? payload.id,
+        id: payload.id ?? payload._id,
+        name: payload.name,
+        first_name: payload.first_name,
+        last_name: payload.last_name,
+        email: payload.email ?? fallbackEmail,
+        role: payload.role,
+        phone: payload.phone,
+        isActive: payload.isActive,
+      };
+      setToken(newToken);
+      setUser(normalizedUser);
+      await AsyncStorage.multiSet([
+        [AUTH_TOKEN_KEY, newToken],
+        [AUTH_USER_KEY, JSON.stringify(normalizedUser)],
+      ]);
+    },
+    [],
+  );
+
   const refreshUser = useCallback(async () => {
     if (!token) return;
     try {
@@ -128,6 +160,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         user,
         ready,
         signIn,
+        applySession,
         signOut,
         refreshUser,
       }}

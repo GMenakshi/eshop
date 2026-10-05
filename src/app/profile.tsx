@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import {
   Alert,
   Modal,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,17 +12,18 @@ import {
   View,
   useWindowDimensions
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWishlist } from "@/context/wishlist-context";
 import { ThemedText } from "@/components/themed-text";
 import { useAuth } from "@/context/auth-context";
 import { addSavedAddress, getSavedAddresses  } from "@/lib/addressStorage";
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
 import { Animated, Dimensions } from "react-native";
 import { Image } from "expo-image";
 import { apiImageUrl, type ApiProduct } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
 import { StoreSwitcher } from "@/components/store-switcher";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 
 
 const ink = "#1A1A1A";
@@ -35,6 +37,34 @@ export default function ProfileScreen() {
   const { user, token, refreshUser, signOut } = useAuth();
   const { items: wishlistItems } = useWishlist();
   const [loading, setLoading] = useState(true);
+  const [signOutOpen, setSignOutOpen] = useState(false);
+  const insets = useSafeAreaInsets();
+  const [company, setCompany] = useState<any | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch(`${API_BASE_URL}/company`)
+      .then((r) => r.json())
+      .then((json) => {
+        if (active && json?.data) setCompany(json.data);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const companyAddress = company?.address
+    ? [
+        company.address.addressLine,
+        company.address.area,
+        company.address.city,
+        company.address.state,
+        company.address.pincode,
+      ]
+        .filter(Boolean)
+        .join(", ")
+    : "";
 const { storeId, activeStore } = useStore();
 const [suggestedProducts, setSuggestedProducts] = useState<ApiProduct[]>([]);
   const [showAddressModal, setShowAddressModal] = useState(false);
@@ -71,6 +101,10 @@ const closePanel = (
 };
 
   const [saving, setSaving] = useState(false);
+  const [profileForm, setProfileForm] = useState({ name: "", phone: "" });
+  const [pwForm, setPwForm] = useState({ current: "", next: "", confirm: "" });
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [savingPw, setSavingPw] = useState(false);
   const [addressForm, setAddressForm] = useState<{
     addressLine: string;
     area: string;
@@ -172,7 +206,67 @@ const handleAddressOptions = (addr: any) => {
 };
 
 const openMyProfile = () => {
+  setProfileForm({
+    name:
+      user?.name?.trim() ||
+      `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim(),
+    phone: user?.phone ?? "",
+  });
+  setPwForm({ current: "", next: "", confirm: "" });
   openPanel(setShowProfileModal, profileSlide);
+};
+
+const saveProfile = async () => {
+  if (!token) return;
+  const name = profileForm.name.trim();
+  const phone = profileForm.phone.trim();
+  if (!name) return Alert.alert("Name required", "Enter your name.");
+  if (phone && phone.length < 10) {
+    return Alert.alert("Invalid phone", "Phone number must be at least 10 digits.");
+  }
+  setSavingProfile(true);
+  try {
+    await api.updateProfile(token, { name, phone: phone || undefined });
+    await refreshUser();
+    Alert.alert("Success", "Profile updated.");
+  } catch (error) {
+    Alert.alert(
+      "Could not update profile",
+      error instanceof Error ? error.message : "Please try again.",
+    );
+  } finally {
+    setSavingProfile(false);
+  }
+};
+
+const savePassword = async () => {
+  if (!token) return;
+  if (!pwForm.current || !pwForm.next || !pwForm.confirm) {
+    return Alert.alert("Missing details", "Fill in all three password fields.");
+  }
+  if (pwForm.next.length < 6) {
+    return Alert.alert("Weak password", "New password must be at least 6 characters.");
+  }
+  if (pwForm.next !== pwForm.confirm) {
+    return Alert.alert("Passwords don't match", "Re-enter the new password.");
+  }
+  setSavingPw(true);
+  try {
+    const res = await api.changePassword(token, {
+      currentPassword: pwForm.current,
+      newPassword: pwForm.next,
+      confirmPassword: pwForm.confirm,
+    });
+    setPwForm({ current: "", next: "", confirm: "" });
+    Alert.alert("Success", res?.message ?? "Password changed.");
+  } catch (error) {
+    Alert.alert(
+      "Could not change password",
+      error instanceof Error ? error.message : "Please try again.",
+    );
+  } finally {
+    setSavingPw(false);
+  }
 };
 
 const openSettings = () => {
@@ -227,19 +321,7 @@ const openSettings = () => {
     }
   };
 
-  const handleSignOut = () => {
-    Alert.alert("Sign out", "Are you sure you want to sign out?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Sign out",
-        style: "destructive",
-        onPress: () => {
-          signOut();
-          router.replace("/sign-in");
-        },
-      },
-    ]);
-  };
+  const handleSignOut = () => setSignOutOpen(true);
 
   // const openMyProfile = () => {
   //   Alert.alert(
@@ -277,7 +359,10 @@ const openSettings = () => {
   return (
     <SafeAreaView style={styles.screen} edges={["top"]}>
       <ScrollView
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[
+          styles.content,
+          { paddingBottom: insets.bottom + 120 },
+        ]}
         showsVerticalScrollIndicator={false}
       >
         {/* ─── Top Bar ─── */}
@@ -329,8 +414,8 @@ const openSettings = () => {
         <StoreSwitcher />
 
         {/* ─── Orders Row ─── */}
-        <View style={styles.card}>
-          <View style={styles.cardHeaderRow}>
+        <View style={styles.compactCard}>
+          <View style={styles.compactHeaderRow}>
             <ThemedText style={styles.cardHeaderTitle}>My Orders</ThemedText>
             <Pressable
               style={styles.cardHeaderAction}
@@ -340,11 +425,26 @@ const openSettings = () => {
               <Ionicons name="chevron-forward" size={14} color={muted} />
             </Pressable>
           </View>
-          <View style={styles.ordersGrid}>
+          {/* <View style={styles.ordersGrid}>
             <OrderStat icon="card-outline" label="Unpaid" onPress={() => router.push("/orders")} />
             <OrderStat icon="car-outline" label="Processing" onPress={() => router.push("/orders")} />
             <OrderStat icon="checkmark-done-outline" label="Delivered" onPress={() => router.push("/orders")} />
             <OrderStat icon="repeat-outline" label="Returns" onPress={() => router.push("/orders")} />
+          </View> */}
+        </View>
+
+
+        {/* ─── Wishlist Row ─── */}
+        <View style={styles.compactCard}>
+          <View style={styles.compactHeaderRow}>
+            <ThemedText style={styles.cardHeaderTitle}>Wishlist</ThemedText>
+            <Pressable
+              style={styles.cardHeaderAction}
+              onPress={() => router.push("/wishlist")}
+            >
+              <ThemedText style={styles.cardHeaderActionText}>View More</ThemedText>
+              <Ionicons name="chevron-forward" size={14} color={muted} />
+            </Pressable>
           </View>
         </View>
 
@@ -420,9 +520,68 @@ const openSettings = () => {
           <View style={styles.sectionHeadingRule} />
           <TextRow
             label="About Us"
-            isLast
+            isLast={!company}
             onPress={() => Alert.alert("About Us", "Coming soon.")}
           />
+
+          {company && (
+            <View style={styles.companyBlock}>
+              <ThemedText style={styles.companyName}>
+                {company.companyName}
+              </ThemedText>
+              {!!company.description && (
+                <ThemedText style={styles.companyDesc}>
+                  {company.description}
+                </ThemedText>
+              )}
+              {!!company.companyPhone && (
+                <ContactRow
+                  icon="call-outline"
+                  text={company.companyPhone}
+                  onPress={() => Linking.openURL(`tel:${company.companyPhone}`)}
+                />
+              )}
+              {!!company.whatsappNo &&
+                company.whatsappNo !== company.companyPhone && (
+                  <ContactRow
+                    icon="logo-whatsapp"
+                    text={company.whatsappNo}
+                    onPress={() =>
+                      Linking.openURL(`https://wa.me/91${company.whatsappNo}`)
+                    }
+                  />
+                )}
+              {!!company.companyEmail && (
+                <ContactRow
+                  icon="mail-outline"
+                  text={company.companyEmail}
+                  onPress={() =>
+                    Linking.openURL(`mailto:${company.companyEmail}`)
+                  }
+                />
+              )}
+              {!!company.supportEmail &&
+                company.supportEmail !== company.companyEmail && (
+                  <ContactRow
+                    icon="headset-outline"
+                    text={company.supportEmail}
+                    onPress={() =>
+                      Linking.openURL(`mailto:${company.supportEmail}`)
+                    }
+                  />
+                )}
+              {!!company.website && (
+                <ContactRow
+                  icon="globe-outline"
+                  text={company.website}
+                  onPress={() => Linking.openURL(company.website)}
+                />
+              )}
+              {!!companyAddress && (
+                <ContactRow icon="location-outline" text={companyAddress} />
+              )}
+            </View>
+          )}
         </View>
         <ThemedText style={styles.trustFooterText}>
         Your Trust{"\n"}is Our Duty
@@ -617,11 +776,20 @@ const openSettings = () => {
       <ThemedText style={styles.panelHeaderTitle}>My Profile</ThemedText>
       <View style={{ width: 22 }} />
     </View>
-    <ScrollView contentContainerStyle={styles.modalForm}>
+    <ScrollView
+      style={{ flex: 1 }}
+      contentContainerStyle={styles.modalForm}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+    >
       <ThemedText style={styles.fieldLabel}>NAME</ThemedText>
-      <View style={styles.readOnlyField}>
-        <ThemedText style={styles.readOnlyText}>{fullName}</ThemedText>
-      </View>
+      <TextInput
+        value={profileForm.name}
+        onChangeText={(t) => setProfileForm((s) => ({ ...s, name: t }))}
+        placeholder="Full name"
+        placeholderTextColor={muted}
+        style={styles.modalInput}
+      />
       <ThemedText style={styles.fieldLabel}>EMAIL</ThemedText>
       <View style={styles.readOnlyField}>
         <ThemedText style={styles.readOnlyText}>
@@ -629,20 +797,69 @@ const openSettings = () => {
         </ThemedText>
       </View>
       <ThemedText style={styles.fieldLabel}>PHONE</ThemedText>
-      <View style={styles.readOnlyField}>
-        <ThemedText style={styles.readOnlyText}>
-          {user?.phone ?? "Not available"}
+      <TextInput
+        value={profileForm.phone}
+        onChangeText={(t) =>
+          setProfileForm((s) => ({ ...s, phone: t.replace(/[^\d+]/g, "") }))
+        }
+        placeholder="Phone number"
+        placeholderTextColor={muted}
+        keyboardType="phone-pad"
+        style={styles.modalInput}
+      />
+      <Pressable
+        style={[styles.saveButton, savingProfile && { opacity: 0.5 }]}
+        disabled={savingProfile}
+        onPress={saveProfile}
+      >
+        <ThemedText style={styles.saveText}>
+          {savingProfile ? "SAVING..." : "SAVE PROFILE"}
         </ThemedText>
-      </View>
-      <ThemedText style={styles.fieldLabel}>ROLE</ThemedText>
-      <View style={styles.readOnlyField}>
-        <ThemedText style={styles.readOnlyText}>
-          {user?.role ?? "Customer"}
+      </Pressable>
+
+      <ThemedText style={styles.passwordSectionTitle}>
+        Change Password
+      </ThemedText>
+      <ThemedText style={styles.fieldLabel}>CURRENT PASSWORD</ThemedText>
+      <TextInput
+        value={pwForm.current}
+        onChangeText={(t) => setPwForm((s) => ({ ...s, current: t }))}
+        secureTextEntry
+        placeholder="Current password"
+        placeholderTextColor={muted}
+        style={styles.modalInput}
+      />
+      <ThemedText style={styles.fieldLabel}>NEW PASSWORD</ThemedText>
+      <TextInput
+        value={pwForm.next}
+        onChangeText={(t) => setPwForm((s) => ({ ...s, next: t }))}
+        secureTextEntry
+        placeholder="New password"
+        placeholderTextColor={muted}
+        style={styles.modalInput}
+      />
+      <ThemedText style={styles.fieldLabel}>CONFIRM NEW PASSWORD</ThemedText>
+      <TextInput
+        value={pwForm.confirm}
+        onChangeText={(t) => setPwForm((s) => ({ ...s, confirm: t }))}
+        secureTextEntry
+        placeholder="Confirm new password"
+        placeholderTextColor={muted}
+        style={styles.modalInput}
+      />
+      <Pressable
+        style={[styles.saveButton, savingPw && { opacity: 0.5 }]}
+        disabled={savingPw}
+        onPress={savePassword}
+      >
+        <ThemedText style={styles.saveText}>
+          {savingPw ? "UPDATING..." : "UPDATE PASSWORD"}
         </ThemedText>
-      </View>
+      </Pressable>
     </ScrollView>
   </Animated.View>
 </Modal>
+
 
 {/* Settings Panel */}
 <Modal
@@ -675,6 +892,19 @@ const openSettings = () => {
     </ScrollView>
   </Animated.View>
 </Modal>
+      <ConfirmDialog
+        visible={signOutOpen}
+        title="Sign out"
+        message="Are you sure you want to sign out?"
+        confirmText="Sign out"
+        destructive
+        onCancel={() => setSignOutOpen(false)}
+        onConfirm={() => {
+          setSignOutOpen(false);
+          signOut();
+          router.replace("/sign-in");
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -709,6 +939,23 @@ function StatItem({
     <Pressable style={styles.statItem} onPress={onPress} disabled={!onPress}>
       <ThemedText style={styles.statValue}>{value}</ThemedText>
       <ThemedText style={styles.statLabel}>{label}</ThemedText>
+    </Pressable>
+  );
+}
+
+function ContactRow({
+  icon,
+  text,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  text: string;
+  onPress?: () => void;
+}) {
+  return (
+    <Pressable style={styles.contactRow} onPress={onPress} disabled={!onPress}>
+      <Ionicons name={icon} size={16} color={muted} />
+      <ThemedText style={styles.contactText}>{text}</ThemedText>
     </Pressable>
   );
 }
@@ -859,6 +1106,18 @@ const styles = StyleSheet.create({
     padding: 18,
     marginBottom: 16,
   },
+  compactCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 10,
+  },
+  compactHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
   cardHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -993,7 +1252,7 @@ const styles = StyleSheet.create({
   modalForm: {
     paddingHorizontal: 20,
     gap: 6,
-    paddingBottom: 24,
+    paddingBottom: 160,
   },
   fieldLabel: {
     color: muted,
@@ -1056,6 +1315,13 @@ readOnlyField: {
   borderRadius: 3,
   paddingHorizontal: 16,
   paddingVertical: 14,
+  marginBottom: 4,
+},
+passwordSectionTitle: {
+  color: ink,
+  fontSize: 16,
+  fontWeight: "800",
+  marginTop: 32,
   marginBottom: 4,
 },
 readOnlyText: {
@@ -1190,6 +1456,16 @@ suggestedPrice: {
   fontSize: 14,
   fontWeight: "800",
 },
+companyBlock: {
+  borderTopWidth: 1,
+  borderTopColor: "#EFEFEF",
+  paddingVertical: 16,
+  gap: 10,
+},
+companyName: { color: ink, fontSize: 16, fontWeight: "800" },
+companyDesc: { color: muted, fontSize: 13, lineHeight: 18, marginBottom: 4 },
+contactRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+contactText: { color: ink, fontSize: 14, fontWeight: "500", flexShrink: 1 },
 trustFooterText: {
   color: "#dddbdb",
   fontSize: 40,

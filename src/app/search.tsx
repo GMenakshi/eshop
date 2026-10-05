@@ -1,3 +1,7 @@
+import { useCart } from "@/context/cart-context";
+import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
+import { useStore } from "@/lib/store-context";
+import { useVoiceSearch } from "@/lib/use-voice-search";
 import { BlurView } from "expo-blur";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
@@ -14,12 +18,6 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ThemedText } from "@/components/themed-text";
-import { useCart } from "@/context/cart-context";
-import { useWishlist } from "@/context/wishlist-context";
-import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
-import { useStore } from "@/lib/store-context";
-import { useVoiceSearch } from "@/lib/use-voice-search";
 
 // Mild orange theme constants
 const themeLightOrange = "#FFF4EB"; // Very mild orange background replacing blue
@@ -43,31 +41,122 @@ export default function SearchResultsScreen() {
   });
   const { query } = useLocalSearchParams<{ query: string }>();
   const [searchQuery, setSearchQuery] = useState(query || "");
-    const voice = useVoiceSearch((text, isFinal) => {
+  const voice = useVoiceSearch((text, isFinal) => {
     setSearchQuery(text);
     if (isFinal) router.setParams({ query: text });
   });
   const { storeId } = useStore();
   const { items: cartItems } = useCart();
-  const { toggle: toggleWishlist, isSaved: isWishlisted } = useWishlist();
-  
+
   const [products, setProducts] = useState<ApiProduct[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const matchesSearchQuery = (product: ApiProduct, rawQuery: string) => {
+    const query = (rawQuery ?? "").trim().toLowerCase();
+    if (!query) return true;
+
+    const synonyms: Record<string, string[]> = {
+      ring: [
+        "ring",
+        "rings",
+        "jewelry",
+        "jewellery",
+        "bracelet",
+        "bracelets",
+        "earring",
+        "earrings",
+        "necklace",
+        "necklaces",
+        "pendant",
+        "pendants",
+        "accessory",
+        "accessories",
+      ],
+      jewelry: [
+        "jewelry",
+        "jewellery",
+        "ring",
+        "rings",
+        "bracelet",
+        "bracelets",
+        "earring",
+        "earrings",
+        "necklace",
+        "necklaces",
+        "pendant",
+        "pendants",
+      ],
+      jewellery: [
+        "jewellery",
+        "jewelry",
+        "ring",
+        "rings",
+        "bracelet",
+        "bracelets",
+        "earring",
+        "earrings",
+        "necklace",
+        "necklaces",
+        "pendant",
+        "pendants",
+      ],
+      bracelet: [
+        "bracelet",
+        "bracelets",
+        "ring",
+        "rings",
+        "jewelry",
+        "jewellery",
+        "accessory",
+        "accessories",
+      ],
+      necklace: [
+        "necklace",
+        "necklaces",
+        "pendant",
+        "pendants",
+        "jewelry",
+        "jewellery",
+        "ring",
+        "rings",
+      ],
+      earring: ["earring", "earrings", "jewelry", "jewellery", "ring", "rings"],
+    };
+
+    const queryTerms = new Set<string>([query]);
+    const stemmed = query.replace(/s$/, "");
+    if (stemmed) queryTerms.add(stemmed);
+
+    const relatedTerms = synonyms[query] ?? synonyms[stemmed] ?? [];
+    relatedTerms.forEach((term) => queryTerms.add(term));
+
+    const haystack = [
+      product.title,
+      product.description,
+      product.categoryName,
+      product.categoryId,
+      product.brandId,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return [...queryTerms].some(
+      (term) => term && haystack.includes(term.toLowerCase()),
+    );
+  };
 
   // Load products based on search query
   useEffect(() => {
     if (!storeId) return;
     setLoading(true);
-    api.products(storeId)
-      .then(res => {
-        const queryLower = (query || "").toLowerCase();
-        // Simple client-side filtering for demonstration
-        const filtered = res.products.filter(p => 
-          (p.title && p.title.toLowerCase().includes(queryLower)) ||
-          (p.description && p.description.toLowerCase().includes(queryLower)) ||
-          (p.categoryName && p.categoryName.toLowerCase().includes(queryLower))
+    api
+      .products(storeId)
+      .then((res) => {
+        const filtered = (res.products ?? []).filter((p) =>
+          matchesSearchQuery(p, query || ""),
         );
-        setProducts(filtered.length > 0 ? filtered : res.products); // fallback to all if no exact match for demo
+        setProducts(filtered.length > 0 ? filtered : (res.products ?? []));
       })
       .finally(() => setLoading(false));
   }, [storeId, query]);
@@ -75,16 +164,32 @@ export default function SearchResultsScreen() {
   const cartCount = cartItems.reduce((acc, item) => acc + item.quantity, 0);
 
   const renderFilterChips = () => (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipsContainer}>
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      contentContainerStyle={styles.filterChipsContainer}
+    >
       <Pressable style={styles.filterChip}>
-        <SymbolView name={{ ios: "slider.horizontal.3", android: "tune", web: "tune" }} size={14} tintColor={ink} />
+        <SymbolView
+          name={{ ios: "slider.horizontal.3", android: "tune", web: "tune" }}
+          size={14}
+          tintColor={ink}
+        />
         <Text style={styles.filterChipText}>Sort & Filter</Text>
       </Pressable>
       <Pressable style={styles.filterChip}>
         <Text style={styles.filterChipText}>Price Live</Text>
       </Pressable>
       <Pressable style={styles.filterChip}>
-        <SymbolView name={{ ios: "square.grid.2x2", android: "grid_view", web: "grid_view" }} size={14} tintColor={ink} />
+        <SymbolView
+          name={{
+            ios: "square.grid.2x2",
+            android: "grid_view",
+            web: "grid_view",
+          }}
+          size={14}
+          tintColor={ink}
+        />
         <Text style={styles.filterChipText}>Value 365</Text>
       </Pressable>
       <Pressable style={styles.filterChip}>
@@ -99,33 +204,65 @@ export default function SearchResultsScreen() {
         <View style={styles.topOffersHeaderLeft}>
           <View style={styles.topOffersBrandIcon} />
           <View>
-            <Text style={styles.topOffersTitle}>Top offers on {query || "Products"}</Text>
+            <Text style={styles.topOffersTitle}>
+              Top offers on {query || "Products"}
+            </Text>
             <Text style={styles.topOffersViewAll}>View all</Text>
           </View>
         </View>
-        <View style={styles.adBadge}><Text style={styles.adBadgeText}>AD</Text></View>
+        <View style={styles.adBadge}>
+          <Text style={styles.adBadgeText}>AD</Text>
+        </View>
       </View>
-      
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.topOffersScroll}>
-        {products.slice(0, 4).map((p, i) => (
-          <Pressable key={`offer-${i}`} style={styles.offerCard} onPress={() => router.push({ pathname: "/product/[id]", params: { id: p._id } })}>
-            <View style={styles.offerImageWrap}>
-              <Image source={{ uri: apiImageUrl(p.image) || "https://via.placeholder.com/150" }} style={styles.offerImage} contentFit="cover" />
-              <View style={styles.ratingBadge}>
-                <Text style={styles.ratingText}>4.1</Text>
-                <Text style={styles.ratingStar}>★</Text>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.topOffersScroll}
+      >
+        {products.slice(0, 4).map((p, i) => {
+          return (
+            <Pressable
+              key={`offer-${i}`}
+              style={styles.offerCard}
+              onPress={() =>
+                router.push({
+                  pathname: "/product/[id]",
+                  params: { id: p._id },
+                })
+              }
+            >
+              <View style={styles.offerImageWrap}>
+                <Image
+                  source={{
+                    uri:
+                      apiImageUrl(p.image) || "https://via.placeholder.com/150",
+                  }}
+                  style={styles.offerImage}
+                  contentFit="cover"
+                />
+                <View style={styles.ratingBadge}>
+                  <Text style={styles.ratingText}>4.1</Text>
+                  <Text style={styles.ratingStar}>★</Text>
+                </View>
               </View>
-            </View>
-            <View style={styles.offerInfo}>
-              <Text style={styles.offerTitle} numberOfLines={1}>{p.title}</Text>
-              <View style={styles.offerPriceRow}>
-                <Text style={styles.offerOriginalPrice}>₹{(p.price * 1.5).toFixed(0)}</Text>
-                <Text style={styles.offerCurrentPrice}>₹{p.price}</Text>
+              <View style={styles.offerInfo}>
+                <Text style={styles.offerTitle} numberOfLines={1}>
+                  {p.title}
+                </Text>
+                <View style={styles.offerPriceRow}>
+                  <Text style={styles.offerOriginalPrice}>
+                    ₹{(p.price * 1.5).toFixed(0)}
+                  </Text>
+                  <Text style={styles.offerCurrentPrice}>₹{p.price}</Text>
+                </View>
+                <Text style={styles.offerPromo} numberOfLines={1}>
+                  Buy for ₹{(p.price * 0.9).toFixed(0)} & get 2%...
+                </Text>
               </View>
-              <Text style={styles.offerPromo} numberOfLines={1}>Buy for ₹{(p.price * 0.9).toFixed(0)} & get 2%...</Text>
-            </View>
-          </Pressable>
-        ))}
+            </Pressable>
+          );
+        })}
       </ScrollView>
     </View>
   );
@@ -133,45 +270,66 @@ export default function SearchResultsScreen() {
   const renderProductGrid = () => (
     <View style={styles.gridContainer}>
       {products.map((p, i) => {
-        const isSaved = isWishlisted(p._id);
         const originalPrice = p.price * 2.5; // dummy logic
         const currentPrice = p.price;
-        const discount = Math.round(((originalPrice - currentPrice) / originalPrice) * 100);
+        const discount = Math.round(
+          ((originalPrice - currentPrice) / originalPrice) * 100,
+        );
 
         return (
-          <Pressable key={`grid-${i}`} style={styles.gridCard} onPress={() => router.push({ pathname: "/product/[id]", params: { id: p._id } })}>
+          <Pressable
+            key={`grid-${i}`}
+            style={styles.gridCard}
+            onPress={() =>
+              router.push({ pathname: "/product/[id]", params: { id: p._id } })
+            }
+          >
             <View style={styles.gridImageWrap}>
-              <Image source={{ uri: apiImageUrl(p.image) || "https://via.placeholder.com/150" }} style={styles.gridImage} contentFit="cover" />
-              
-              <View style={styles.gridAdBadge}><Text style={styles.gridAdBadgeText}>AD</Text></View>
-              
-              <Pressable 
-                style={styles.heartBtn} 
-                onPress={(e) => {
-                  e.stopPropagation();
-                  toggleWishlist({ id: p._id, name: p.title, price: p.price, image: p.image ?? "", brand: p.brandId || "Brand", category: p.categoryId || "", description: p.description ?? "" });
+              <Image
+                source={{
+                  uri:
+                    apiImageUrl(p.image) || "https://via.placeholder.com/150",
                 }}
-              >
-                <SymbolView name={isSaved ? "heart.fill" : "heart"} size={16} tintColor={isSaved ? "#E8634A" : "#999999"} />
-              </Pressable>
-              
+                style={styles.gridImage}
+                contentFit="cover"
+              />
+
+              <View style={styles.gridAdBadge}>
+                <Text style={styles.gridAdBadgeText}>AD</Text>
+              </View>
+
               <View style={styles.gridRatingBadge}>
                 <Text style={styles.gridRatingText}>3.9 ★ | 7.8K+</Text>
               </View>
             </View>
-            
+
             <View style={styles.gridInfo}>
-              <Text style={styles.gridBrandLabel}>✓ Assured  {p.brandId || "Birde"}</Text>
-              <Text style={styles.gridTitle} numberOfLines={1}>{p.title}</Text>
-              
+              <Text style={styles.gridBrandLabel}>
+                ✓ Assured {p.brandId || "Birde"}
+              </Text>
+              <Text style={styles.gridTitle} numberOfLines={1}>
+                {p.title}
+              </Text>
+
               <View style={styles.gridPriceRow}>
                 <Text style={styles.gridDiscount}>↓{discount}%</Text>
-                <Text style={styles.gridOriginalPrice}>₹{originalPrice.toFixed(0)}</Text>
-                <Text style={styles.gridCurrentPrice}>₹{currentPrice.toFixed(0)}</Text>
+                <Text style={styles.gridOriginalPrice}>
+                  ₹{originalPrice.toFixed(0)}
+                </Text>
+                <Text style={styles.gridCurrentPrice}>
+                  ₹{currentPrice.toFixed(0)}
+                </Text>
               </View>
-              
-              <Text style={styles.gridWowPromo}>WOW! Buy at ₹{(currentPrice * 0.9).toFixed(0)}</Text>
-              <Text style={styles.gridDelivery}>Get it <Text style={{fontStyle: 'italic', fontWeight: 'bold'}}>Tomorrow</Text></Text>
+
+              <Text style={styles.gridWowPromo}>
+                WOW! Buy at ₹{(currentPrice * 0.9).toFixed(0)}
+              </Text>
+              <Text style={styles.gridDelivery}>
+                Get it{" "}
+                <Text style={{ fontStyle: "italic", fontWeight: "bold" }}>
+                  Tomorrow
+                </Text>
+              </Text>
             </View>
           </Pressable>
         );
@@ -179,11 +337,14 @@ export default function SearchResultsScreen() {
     </View>
   );
 
-      return (
+  return (
     <View style={styles.container}>
       <Animated.ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingTop: headerTotal, paddingBottom: 40 + insets.bottom }}
+        contentContainerStyle={{
+          paddingTop: headerTotal,
+          paddingBottom: 40 + insets.bottom,
+        }}
         scrollEventThrottle={16}
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
@@ -192,18 +353,29 @@ export default function SearchResultsScreen() {
       >
         {renderFilterChips()}
         {products.length > 0 && renderTopOffers()}
-        {products.length > 0 ? renderProductGrid() : (
+        {products.length > 0 ? (
+          renderProductGrid()
+        ) : (
           <View style={{ padding: 40, alignItems: "center" }}>
-            <Text style={{ color: muted, fontSize: 16 }}>Loading results...</Text>
+            <Text style={{ color: muted, fontSize: 16 }}>
+              Loading results...
+            </Text>
           </View>
         )}
       </Animated.ScrollView>
 
       {/* floating header */}
-      <View style={[styles.headerWrap, { height: headerTotal }]} pointerEvents="box-none">
+      <View
+        style={[styles.headerWrap, { height: headerTotal }]}
+        pointerEvents="box-none"
+      >
         <Animated.View
           pointerEvents="none"
-          style={[StyleSheet.absoluteFill, styles.headerBg, { opacity: bgOpacity }]}
+          style={[
+            StyleSheet.absoluteFill,
+            styles.headerBg,
+            { opacity: bgOpacity },
+          ]}
         >
           <BlurView
             intensity={50}
@@ -212,18 +384,38 @@ export default function SearchResultsScreen() {
             style={StyleSheet.absoluteFill}
           />
           <LinearGradient
-            colors={["rgba(255,226,140,0.88)", "rgba(255,240,187,0.72)", "rgba(255,247,214,0.55)"]}
+            colors={[
+              "rgba(255,226,140,0.88)",
+              "rgba(255,240,187,0.72)",
+              "rgba(255,247,214,0.55)",
+            ]}
             style={StyleSheet.absoluteFill}
           />
         </Animated.View>
 
         <View style={[styles.headerRow, { paddingTop: insets.top + PAD_TOP }]}>
           <Pressable style={styles.iconBtn} onPress={() => router.back()}>
-            <SymbolView name={{ ios: "arrow.left", android: "arrow_back", web: "arrow_back" }} size={24} tintColor={ink} />
+            <SymbolView
+              name={{
+                ios: "arrow.left",
+                android: "arrow_back",
+                web: "arrow_back",
+              }}
+              size={24}
+              tintColor={ink}
+            />
           </Pressable>
 
           <View style={styles.pill}>
-            <SymbolView name={{ ios: "magnifyingglass", android: "search", web: "search" }} size={22} tintColor="#2B2B2B" />
+            <SymbolView
+              name={{
+                ios: "magnifyingglass",
+                android: "search",
+                web: "search",
+              }}
+              size={22}
+              tintColor="#2B2B2B"
+            />
             <TextInput
               style={styles.pillInput}
               value={searchQuery}
@@ -234,11 +426,26 @@ export default function SearchResultsScreen() {
               returnKeyType="search"
             />
             <View style={styles.pillDivider} />
-            <SymbolView name={{ ios: "mic.fill", android: "mic", web: "mic" }} size={22} tintColor="#2B2B2B" />
+            <SymbolView
+              name={{ ios: "mic.fill", android: "mic", web: "mic" }}
+              size={22}
+              tintColor="#2B2B2B"
+            />
           </View>
 
-          <Pressable style={styles.iconBtn} onPress={() => router.push("/cart")}>
-            <SymbolView name={{ ios: "cart", android: "shopping_cart", web: "shopping_cart" }} size={24} tintColor={ink} />
+          <Pressable
+            style={styles.iconBtn}
+            onPress={() => router.push("/cart")}
+          >
+            <SymbolView
+              name={{
+                ios: "cart",
+                android: "shopping_cart",
+                web: "shopping_cart",
+              }}
+              size={24}
+              tintColor={ink}
+            />
             {cartCount > 0 && (
               <View style={styles.cartBadge}>
                 <Text style={styles.cartBadgeText}>{cartCount}</Text>
@@ -256,12 +463,12 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#FFFFFF",
   },
-header: {
-  flexDirection: "row",
-  alignItems: "center",
-  paddingHorizontal: 16,
-  height: HEADER_HEIGHT,
-},
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    height: HEADER_HEIGHT,
+  },
   backBtn: {
     padding: 4,
     marginRight: 8,
@@ -310,7 +517,7 @@ header: {
   scrollContent: {
     paddingBottom: 40,
   },
-  
+
   // Filter Chips
   filterChipsContainer: {
     paddingHorizontal: 16,
@@ -492,17 +699,6 @@ header: {
     color: "#FFFFFF",
     fontWeight: "bold",
   },
-  heartBtn: {
-    position: "absolute",
-    top: 6,
-    right: 6,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,0.9)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
   gridRatingBadge: {
     position: "absolute",
     bottom: 6,
@@ -563,14 +759,14 @@ header: {
     color: muted,
   },
   headerBg: {
-  position: "absolute",
-  top: 0,
-  left: 0,
-  right: 0,
-  backgroundColor: themeLightOrange,
-  borderBottomLeftRadius: 16,
-  borderBottomRightRadius: 16,
-},
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: themeLightOrange,
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+  },
   headerWrap: {
     position: "absolute",
     top: 0,

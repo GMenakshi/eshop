@@ -1,15 +1,14 @@
+import { ProductRail } from "@/components/product-rail";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { router, useLocalSearchParams } from "expo-router";
 import { SymbolView } from "expo-symbols";
-import { useEffect, useRef, useState } from "react";
 import { VideoView, useVideoPlayer } from "expo-video";
-import { ProductRail } from "@/components/product-rail";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Animated,
-  Clipboard,
   Dimensions,
   Linking,
   Pressable,
@@ -29,15 +28,15 @@ import { useAuth } from "@/context/auth-context";
 import { useCart } from "@/context/cart-context";
 import { useWishlist } from "@/context/wishlist-context";
 import {
+  API_BASE_URL,
   api,
   apiImageUrl,
-  API_BASE_URL,
   type ApiProduct,
   type ApiVariant,
 } from "@/lib/api";
 import { goBackOrHome } from "@/lib/navigation";
-import { useStore } from "@/lib/store-context";
 import { addRecentlyViewed, getRecentlyViewedIds } from "@/lib/recently-viewed";
+import { useStore } from "@/lib/store-context";
 
 const ink = "#1A1A1A";
 const muted = "#999999";
@@ -190,7 +189,7 @@ export default function ProductViewScreen() {
   const insets = useSafeAreaInsets();
   const { token, user } = useAuth();
   const [deliveryExpanded, setDeliveryExpanded] = useState(true);
-  const { addItem } = useCart();
+  const { addItem, items: cartItems } = useCart();
   const { storeId, activeStore } = useStore();
   const { toggle, isSaved } = useWishlist();
   const [product, setProduct] = useState<ApiProduct | null>(null);
@@ -199,7 +198,9 @@ export default function ProductViewScreen() {
   const [quantity, setQuantity] = useState(1);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
+  const [showCartToast, setShowCartToast] = useState(false);
   const [cartBounce] = useState(() => new Animated.Value(1));
+  const cartToastAnim = useRef(new Animated.Value(0)).current;
   const [scrollX] = useState(() => new Animated.Value(0));
   const [reviews, setReviews] = useState<ReviewView[]>([]);
   const [ratingStats, setRatingStats] = useState({ average: 0, total: 0 });
@@ -355,6 +356,32 @@ export default function ProductViewScreen() {
     };
   }, [id, storeId]);
 
+  useEffect(() => {
+    if (!showCartToast) {
+      Animated.timing(cartToastAnim, {
+        toValue: 0,
+        duration: 180,
+        useNativeDriver: true,
+      }).start();
+      return;
+    }
+
+    Animated.sequence([
+      Animated.timing(cartToastAnim, {
+        toValue: 1,
+        duration: 220,
+        useNativeDriver: true,
+      }),
+      Animated.delay(1800),
+      Animated.timing(cartToastAnim, {
+        toValue: 0,
+        duration: 220,
+        useNativeDriver: true,
+      }),
+    ]).start(() => setShowCartToast(false));
+  }, [showCartToast, cartToastAnim]);
+
+
   const recentProducts = recentIds
     .map((rid) => forYou.find((p) => p._id === rid))
     .filter(Boolean) as ApiProduct[];
@@ -386,6 +413,20 @@ export default function ProductViewScreen() {
   const categoryLabel =
     product?.categoryName || product?.categoryId || "Collection";
 
+  const currentVariantId =
+    selectedVariant?._id ??
+    selectedVariant?.id ??
+    selectedColorVariant?._id ??
+    selectedColorVariant?.id ??
+    product?.variantId;
+  const addedToCart = cartItems.some((item) => {
+    if (item.id !== product?._id) return false;
+    if (!currentVariantId) return true;
+    const itemVariantId =
+      "variantId" in item.product ? item.product.variantId : undefined;
+    return itemVariantId === currentVariantId;
+  });
+
   const savedAddress = user?.address;
   const hasSavedAddress =
     savedAddress &&
@@ -400,12 +441,11 @@ export default function ProductViewScreen() {
     setGalleryIndex(0); // reset image carousel to first photo
   };
 
-    const shareProduct = async () => {
+  const shareProduct = async () => {
     if (!product) return;
-    const imageUrl = (apiImageUrl(productImages[0] ?? product.image) ?? "").replace(
-      / /g,
-      "%20",
-    );
+    const imageUrl = (
+      apiImageUrl(productImages[0] ?? product.image) ?? ""
+    ).replace(/ /g, "%20");
     const description = product.description
       ?.replace(/<[^>]+>/g, "")
       .trim()
@@ -417,7 +457,9 @@ export default function ProductViewScreen() {
         : `Price: ₹${currentPrice}`,
       selectedColorVariant?.color ? `Color: ${selectedColorVariant.color}` : "",
       currentSize && currentSize !== "One Size" ? `Size: ${currentSize}` : "",
-      currentWeight && currentWeight !== "N/A" ? `Weight: ${currentWeight}` : "",
+      currentWeight && currentWeight !== "N/A"
+        ? `Weight: ${currentWeight}`
+        : "",
       product.productCode ? `Code: ${product.productCode}` : "",
       description ? description : "",
       imageUrl ? `Image: ${imageUrl}` : "",
@@ -435,12 +477,21 @@ export default function ProductViewScreen() {
     }
     setAdding(true);
     try {
-      const variantId = selectedVariant?._id ?? product.variantId;
+      const variantId =
+        selectedVariant?._id ??
+        selectedVariant?.id ??
+        selectedColorVariant?._id ??
+        selectedColorVariant?.id ??
+        product.variantId;
+      const selectedImage =
+        selectedColorVariant?.images?.[0] ?? productImages[0] ?? product.image;
       const productToAdd = {
         ...product,
         variantId,
         color: selectedColorVariant?.color,
-        colorVariantId: selectedColorVariant?._id,
+        colorVariantId: selectedColorVariant?._id ?? selectedColorVariant?.id,
+        image: selectedImage,
+        images: selectedImage ? [selectedImage] : product.images,
         price: currentPrice,
         originalPrice: currentOriginalPrice,
         size: currentSize,
@@ -451,7 +502,7 @@ export default function ProductViewScreen() {
         Animated.spring(cartBounce, { toValue: 1.18, useNativeDriver: true }),
         Animated.spring(cartBounce, { toValue: 1, useNativeDriver: true }),
       ]).start();
-      Alert.alert("Added to cart", "Your product is ready in the cart.");
+      setShowCartToast(true);
     } catch (error) {
       Alert.alert(
         "Could not add product",
@@ -470,7 +521,12 @@ export default function ProductViewScreen() {
     }
     setAdding(true);
     try {
-      const variantId = selectedVariant?._id ?? product.variantId;
+      const variantId =
+        selectedVariant?._id ??
+        selectedVariant?.id ??
+        selectedColorVariant?._id ??
+        selectedColorVariant?.id ??
+        product.variantId;
       const productToAdd = {
         ...product,
         variantId,
@@ -539,7 +595,7 @@ export default function ProductViewScreen() {
               tintColor={ink}
             />
           </Pressable>
-          <View style={st.topBarCenter}>
+          {/* <View style={st.topBarCenter}>
             <SymbolView
               name={{
                 ios: "magnifyingglass",
@@ -552,22 +608,7 @@ export default function ProductViewScreen() {
             <ThemedText style={st.topBarSearchText} numberOfLines={1}>
               What are you looking for?
             </ThemedText>
-          </View>
-          <Pressable
-            accessibilityLabel="Share product"
-            style={st.topBarBtn}
-            onPress={shareProduct}
-          >
-            <SymbolView
-              name={{
-                ios: "square.and.arrow.up",
-                android: "share",
-                web: "share",
-              }}
-              size={20}
-              tintColor={ink}
-            />
-          </Pressable>
+          </View> */}
         </View>
 
         {/* ─── Product Image Gallery ─── */}
@@ -672,6 +713,22 @@ export default function ProductViewScreen() {
                 </ThemedText>
               </View>
             </View>
+            <View style={st.titleActions}>
+            <Pressable
+              accessibilityLabel="Share product"
+              style={st.wishlistBtn}
+              onPress={shareProduct}
+            >
+              <SymbolView
+                name={{
+                  ios: "square.and.arrow.up",
+                  android: "share",
+                  web: "share",
+                }}
+                size={20}
+                tintColor={ink}
+              />
+            </Pressable>
             <Pressable
               accessibilityLabel="Toggle wishlist"
               style={st.wishlistBtn}
@@ -707,6 +764,7 @@ export default function ProductViewScreen() {
                 tintColor={isSaved(product._id) ? accent : "#CCCCCC"}
               />
             </Pressable>
+            </View>
           </View>
 
           {hasColorVariants && (
@@ -1314,11 +1372,13 @@ export default function ProductViewScreen() {
       >
         <Pressable
           disabled={adding}
-          onPress={addToCart}
-          style={st.addToCartBtn}
+          onPress={addedToCart ? () => router.push("/cart") : addToCart}
+          style={[st.addToCartBtn, addedToCart && st.goToCartBtn]}
         >
-          <ThemedText style={st.addToCartText}>
-            {adding ? "Adding..." : "Add to Cart"}
+          <ThemedText
+            style={[st.addToCartText, addedToCart && st.goToCartText]}
+          >
+            {adding ? "Adding..." : addedToCart ? "Go to Cart" : "Add to Cart"}
           </ThemedText>
         </Pressable>
         <Pressable
@@ -1329,6 +1389,39 @@ export default function ProductViewScreen() {
           <ThemedText style={st.buyNowText}>Order Now</ThemedText>
         </Pressable>
       </Animated.View>
+
+      {showCartToast && (
+        <Animated.View
+          pointerEvents="box-none"
+          style={[
+            st.toastOverlay,
+            {
+              opacity: cartToastAnim,
+              transform: [
+                {
+                  translateY: cartToastAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [18, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
+          <View style={st.toastCard}>
+            <ThemedText style={st.toastText}>Item added to cart</ThemedText>
+            <Pressable
+              onPress={() => {
+                setShowCartToast(false);
+                router.push("/cart");
+              }}
+              style={st.toastButton}
+            >
+              <ThemedText style={st.toastButtonText}>Go to cart</ThemedText>
+            </Pressable>
+          </View>
+        </Animated.View>
+      )}
     </SafeAreaView>
   );
 }
@@ -1501,6 +1594,11 @@ const st = StyleSheet.create({
     fontWeight: "500",
     color: muted,
   },
+  titleActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   wishlistBtn: {
     width: 40,
     height: 40,
@@ -1627,7 +1725,7 @@ const st = StyleSheet.create({
 
   /* ─── Description ─── */
   descSection: {
-    marginTop: 24,
+    marginTop: 12,
     // backgroundColor: "#F3F8FC",
     // borderWidth: 1,
     // borderColor: "#DCEBF5",
@@ -1917,6 +2015,47 @@ const st = StyleSheet.create({
     flexDirection: "row",
     gap: 12,
   },
+  toastOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 86,
+    paddingHorizontal: 16,
+    zIndex: 30,
+  },
+  toastCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#1E1E1E",
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    shadowColor: "#000000",
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 8,
+  },
+  toastText: {
+    flex: 1,
+    marginRight: 12,
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  toastButton: {
+    backgroundColor: "#F5F5F5",
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  toastButtonText: {
+    color: "#111111",
+    fontSize: 13,
+    fontWeight: "700",
+    letterSpacing: 0.2,
+  },
   addToCartBtn: {
     flex: 1,
     height: 52,
@@ -1927,6 +2066,8 @@ const st = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  goToCartBtn: { backgroundColor: ink },
+  goToCartText: { color: "#FFFFFF" },
   addToCartText: {
     color: ink,
     fontSize: 14,
@@ -2020,7 +2161,7 @@ const st = StyleSheet.create({
 
   colorSection: {
     marginTop: 0,
-    marginBottom: 20,
+    marginBottom: 8,
   },
   colorSectionTitle: {
     fontSize: 14,

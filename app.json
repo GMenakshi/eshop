@@ -32,14 +32,11 @@
           "data": [
             {
               "scheme": "https",
-              "host": "https://estorebackend.amptechnology.in",
+              "host": "estorebackend.amptechnology.in",
               "pathPrefix": "/store"
             }
           ],
-          "category": [
-            "BROWSABLE",
-            "DEFAULT"
-          ]
+          "category": ["BROWSABLE", "DEFAULT"]
         }
       ]
     },
@@ -69,6 +66,12 @@
         {
           "microphonePermission": "Allow ESHOP to use the microphone for voice search.",
           "speechRecognitionPermission": "Allow ESHOP to use speech recognition for voice search."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow ESHOP to use your location to fill in your delivery address."
         }
       ]
     ],

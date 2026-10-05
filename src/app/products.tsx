@@ -106,7 +106,7 @@ export default function ProductsScreen() {
   const renderHeader = () => (
     <View>
       {/* Search bar */}
-      <View style={styles.searchWrap}>
+      {/* <View style={styles.searchWrap}>
         <View style={styles.searchInputContainer}>
           <SymbolView
             name={{ ios: "magnifyingglass", android: "search", web: "search" }}
@@ -122,7 +122,7 @@ export default function ProductsScreen() {
             returnKeyType="search"
           />
         </View>
-      </View>
+      </View> */}
 
       {/* Filter chips */}
       <ScrollView

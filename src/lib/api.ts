@@ -73,7 +73,6 @@ export type ApiVariant = {
   sizeVariants?: ApiSizeVariant[]; // NEW — nested variants (e.g. Sofa-style color→size structure)
 };
 
-
 type ApiProductSource = Partial<{
   _id: string;
   id: string;
@@ -124,6 +123,8 @@ export type ApiProduct = {
   productCode?: string;
   storeId?: string;
   variantId?: string;
+  color?: string;
+  colorVariantId?: string;
   variants?: ApiVariant[];
   rating?: number;
 };
@@ -153,16 +154,19 @@ const normalizeProduct = (
       0,
   );
   const originalPrice = Number(
-    firstSizeVariant?.mrp ?? firstVariant?.mrp ?? product.mrp ?? product.price ?? offerPrice ?? 0,
+    firstSizeVariant?.mrp ??
+      firstVariant?.mrp ??
+      product.mrp ??
+      product.price ??
+      offerPrice ??
+      0,
   );
   const categoryName =
     typeof product.category === "object" && product.category
       ? (product.category.name ?? "Collection")
       : (product.categoryId ?? "Collection");
   const variantId =
-    product.variantId ??
-    product.variant_id ??
-    firstVariant?._id;
+    product.variantId ?? product.variant_id ?? firstVariant?._id;
 
   return {
     _id: id,
@@ -195,6 +199,8 @@ export type ApiCartItem = {
   _id?: string;
   productId?: string | { _id?: string; id?: string };
   variantId?: string;
+  color?: string;
+  colorVariantId?: string;
   product?: ApiProduct;
   quantity: number;
   storeId?: string;
@@ -216,14 +222,20 @@ export type ApiCartResponse = {
     | {
         _id?: string;
         items?: ApiCartItem[];
-        stores?: { store?: { _id?: string; storeName?: string }; items?: ApiCartItem[] }[];
+        stores?: {
+          store?: { _id?: string; storeName?: string };
+          items?: ApiCartItem[];
+        }[];
       };
   data?:
     | ApiCartItem[]
     | {
         _id?: string;
         items?: ApiCartItem[];
-        stores?: { store?: { _id?: string; storeName?: string }; items?: ApiCartItem[] }[];
+        stores?: {
+          store?: { _id?: string; storeName?: string };
+          items?: ApiCartItem[];
+        }[];
       };
   cartItems?: ApiCartItem[];
   cartId?: string;
@@ -270,7 +282,7 @@ async function request<T>(
       ),
     });
   }
-    if (!response.ok) {
+  if (!response.ok) {
     console.error("[API] Request failed", {
       method: options.method ?? "GET",
       url: finalUrl,
@@ -295,7 +307,7 @@ export const api = {
       message: string;
     }>("/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, role: "USER" }),
     }),
   signUp: (fields: {
     name: string;
@@ -384,6 +396,23 @@ export const api = {
       throw err;
     }
   },
+  changePassword: (
+    token: string,
+    fields: {
+      currentPassword: string;
+      newPassword: string;
+      confirmPassword: string;
+    },
+  ) =>
+    request<{ message?: string }>("/login/update-profile", {
+      method: "PUT",
+      headers: { "x-access-token": token },
+      body: JSON.stringify({
+        currentPassword: fields.currentPassword,
+        password: fields.newPassword,
+        confirmPassword: fields.confirmPassword,
+      }),
+    }),
   storeExists: async (storeId: string) => {
     const trimmed = storeId?.trim();
     if (!trimmed) return false;
@@ -400,34 +429,38 @@ export const api = {
     }
   },
   storeInfo: async (storeId: string) => {
-  const trimmed = storeId?.trim();
-  if (!trimmed) return null;
-  try {
-    const res = await request<{
-      store?: {
-        _id?: string;
-        storeName?: string;
-        name?: string;
-        whatsapp?: string;
-        whatsappNo?: string;
-        contactNo?: string;
-        phone?: string;
+    const trimmed = storeId?.trim();
+    if (!trimmed) return null;
+    try {
+      const res = await request<{
+        store?: {
+          _id?: string;
+          storeName?: string;
+          name?: string;
+          whatsapp?: string;
+          whatsappNo?: string;
+          contactNo?: string;
+          phone?: string;
+        };
+      }>(
+        "?limit=1",
+        { method: "GET" },
+        `${storeProductsUrl(trimmed)}/products`,
+      );
+      return {
+        id: trimmed,
+        mongoId: res.store?._id,
+        name: res.store?.storeName ?? res.store?.name,
+        phone:
+          res.store?.whatsappNo ??
+          res.store?.whatsapp ??
+          res.store?.contactNo ??
+          res.store?.phone,
       };
-    }>("?limit=1", { method: "GET" }, `${storeProductsUrl(trimmed)}/products`);
-    return {
-      id: trimmed,
-      mongoId: res.store?._id,
-      name: res.store?.storeName ?? res.store?.name,
-      phone:
-        res.store?.whatsappNo ??
-        res.store?.whatsapp ??
-        res.store?.contactNo ??
-        res.store?.phone,
-    };
-  } catch {
-    return null;
-  }
-},
+    } catch {
+      return null;
+    }
+  },
   products: async (storeId: string, page = 1) => {
     const response = await request<{
       store?: { _id?: string; storeUniqueId?: string };
@@ -485,11 +518,7 @@ export const api = {
       products,
     };
   },
-  productsByCategory: async (
-    storeId: string,
-    categoryId: string,
-    page = 1,
-  ) => {
+  productsByCategory: async (storeId: string, categoryId: string, page = 1) => {
     const response = await request<{
       category?: { _id: string; name: string };
       products: ApiProductSource[];
@@ -515,7 +544,7 @@ export const api = {
       },
     };
   },
-searchProducts: async (storeId: string, title: string, page = 1) => {
+  searchProducts: async (storeId: string, title: string, page = 1) => {
     const params = new URLSearchParams({ search: title });
     if (page > 1) params.set("page", String(page));
 
@@ -538,18 +567,18 @@ searchProducts: async (storeId: string, title: string, page = 1) => {
     };
   },
   categories: (storeId: string) =>
-  request<{
-    success?: boolean;
-    store?: unknown;
-    count?: number;
-    categories: {
-      _id: string;
-      name: string;
-      productCount?: number;
-      image?: string;
-      icon?: string;
-    }[];
-  }>("", {}, `${storeProductsUrl(storeId)}/categories`),
+    request<{
+      success?: boolean;
+      store?: unknown;
+      count?: number;
+      categories: {
+        _id: string;
+        name: string;
+        productCount?: number;
+        image?: string;
+        icon?: string;
+      }[];
+    }>("", {}, `${storeProductsUrl(storeId)}/categories`),
   subcategoryDetails: (id: string) => request(`/api/subcategorydetails/${id}`),
   brands: () =>
     request<{
@@ -559,19 +588,19 @@ searchProducts: async (storeId: string, title: string, page = 1) => {
       }[];
     }>("/api/brands"),
   brandDetails: (id: string) => request(`/api/branddetails/${id}`),
-banners: () =>
-  request<{
-    success?: boolean;
-    banners: {
-      _id: string;
-      name: string;
-      image: string;
-      isActive: boolean;
-      storeId: string;
-      categoryId?: string | { _id?: string } | null;
-      productId?: string | { _id?: string } | null;
-    }[];
-  }>("/banner/banners"),
+  banners: () =>
+    request<{
+      success?: boolean;
+      banners: {
+        _id: string;
+        name: string;
+        image: string;
+        isActive: boolean;
+        storeId: string;
+        categoryId?: string | { _id?: string } | null;
+        productId?: string | { _id?: string } | null;
+      }[];
+    }>("/banner/banners"),
   cart: async (token: string) => {
     console.log("[Cart] Fetching backend cart", {
       endpoint: `${API_BASE_URL}/cart`,
@@ -612,13 +641,13 @@ banners: () =>
   ) => {
     const body: {
       productId: string;
-      variantId: string;
+      variantId?: string;
       quantity: number;
     } = {
       productId,
-      variantId: options?.variantId ?? productId,
       quantity,
     };
+    if (options?.variantId) body.variantId = options.variantId;
     console.log("[Cart] Adding product to cart", body);
     return request("/cart/add", {
       method: "POST",
@@ -715,7 +744,7 @@ banners: () =>
       body: JSON.stringify(payload),
     });
   },
-    clearCart: (token: string) =>
+  clearCart: (token: string) =>
     request("/cart", {
       method: "DELETE",
       headers: { "x-access-token": token },
@@ -729,24 +758,16 @@ banners: () =>
     }>("/order/my-orders", {
       headers: { "x-access-token": token },
     }),
-  cancelOrder: (
-    token: string,
-    orderId: string,
-    reason?: string,
-  ) =>
+  cancelOrder: (token: string, orderId: string, reason?: string) =>
     request<{
       success: boolean;
       message: string;
       order?: unknown;
-    }>(
-      `/order/my-orders/${encodeURIComponent(orderId)}/cancel`,
-      {
-        method: "PATCH",
-        headers: { "x-access-token": token },
-        body: JSON.stringify({ reason }),
-      },
-    ),
+    }>(`/order/my-orders/${encodeURIComponent(orderId)}/cancel`, {
+      method: "PATCH",
+      headers: { "x-access-token": token },
+      body: JSON.stringify({ reason }),
+    }),
 };
 
 export { API_BASE_URL };
-

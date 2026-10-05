@@ -1,14 +1,22 @@
+import * as Location from "expo-location";
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   TextInput,
   View,
 } from "react-native";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 
 import { ThemedText } from "@/components/themed-text";
 import { useAuth } from "@/context/auth-context";
@@ -22,6 +30,15 @@ const ink = "#17211D";
 const muted = "#748078";
 const field = "#E4ECE4";
 const border = "#D7E0D6";
+
+function FieldLabel({ text, required }: { text: string; required?: boolean }) {
+  return (
+    <ThemedText style={styles.fieldLabel}>
+      {text}
+      {required && <ThemedText style={styles.requiredStar}> *</ThemedText>}
+    </ThemedText>
+  );
+}
 
 function AddressRadio({ selected }: { selected: boolean }) {
   return (
@@ -37,7 +54,13 @@ export default function CheckoutScreen() {
   const { token, user } = useAuth();
   const insets = useSafeAreaInsets();
   const { storeId, activeStore } = useStore();
-  const { items: allItems, cartId, loading: cartLoading, clearCart, removeItem } = useCart();
+  const {
+    items: allItems,
+    cartId,
+    loading: cartLoading,
+    clearCart,
+    removeItem,
+  } = useCart();
 
   const {
     isBuyNow,
@@ -60,7 +83,9 @@ export default function CheckoutScreen() {
   const [buyNowProduct, setBuyNowProduct] = useState<ApiProduct | null>(null);
   const [savedAddresses, setSavedAddresses] = useState<any[]>([]);
   const [profileAddress, setProfileAddress] = useState<any | null>(null);
-  const [selectedAddressIndex, setSelectedAddressIndex] = useState<number | null>(null);
+  const [selectedAddressIndex, setSelectedAddressIndex] = useState<
+    number | null
+  >(null);
   const [section, setSection] = useState<"shipping" | "payment" | "review">(
     "shipping",
   );
@@ -78,13 +103,109 @@ export default function CheckoutScreen() {
   const [placing, setPlacing] = useState(false);
   const [editingAddress, setEditingAddress] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [pinLoading, setPinLoading] = useState(false);
+  const [remarks, setRemarks] = useState("");
+  const [remarksHeight, setRemarksHeight] = useState(44);
+
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", () =>
+      setKeyboardOpen(true),
+    );
+    const hide = Keyboard.addListener("keyboardDidHide", () =>
+      setKeyboardOpen(false),
+    );
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   // Opens the picker. The form only shows straight away if there are no addresses to pick from.
   const openEditor = () => {
     setEditingAddress(true);
     setShowForm(!(profileAddress || savedAddresses.length > 0));
   };
-  const [paymentChoice, setPaymentChoice] = useState<"COD" | "UPI" | "CARD" | "NETBANKING">("COD");
+  const fillFromCurrentLocation = async () => {
+    setLocating(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert(
+          "Location permission needed",
+          "Allow location access, or enter your address manually.",
+        );
+        return;
+      }
+      const pos = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      const [place] = await Location.reverseGeocodeAsync({
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+      });
+      if (!place) {
+        Alert.alert(
+          "Could not find address",
+          "We couldn't read your address from this location. Please enter it manually.",
+        );
+        return;
+      }
+      const addressLine = [place.name, place.street]
+        .filter((v, i, arr) => v && arr.indexOf(v) === i)
+        .join(", ");
+      setShipping((s) => ({
+        ...s,
+        fullName: s.fullName || user?.name || "",
+        phone: s.phone || user?.phone || "",
+        addressLine: addressLine || s.addressLine,
+        area: place.district ?? place.subregion ?? s.area,
+        city: place.city ?? place.subregion ?? s.city,
+        state: place.region ?? s.state,
+        pincode: place.postalCode ?? s.pincode,
+        country: place.country || "India",
+      }));
+      setSelectedAddressIndex(null);
+      setShowForm(true);
+      setEditingAddress(true);
+    } catch (e) {
+      Alert.alert(
+        "Could not get location",
+        "Make sure location is turned on, or enter your address manually.",
+      );
+    } finally {
+      setLocating(false);
+    }
+  };
+
+  const lookupPincode = async (pin: string) => {
+    setPinLoading(true);
+    try {
+      const res = await fetch(`https://api.postalpincode.in/pincode/${pin}`);
+      const json = await res.json();
+      const office = json?.[0]?.PostOffice?.[0];
+      if (json?.[0]?.Status === "Success" && office) {
+        setShipping((s) =>
+          s.pincode === pin
+            ? {
+                ...s,
+                city: office.District ?? s.city,
+                state: office.State ?? s.state,
+              }
+            : s,
+        );
+      }
+    } catch {
+      // Silent: the user can still type city and state manually
+    } finally {
+      setPinLoading(false);
+    }
+  };
+
+  const [paymentChoice, setPaymentChoice] = useState<
+    "COD" | "UPI" | "CARD" | "NETBANKING"
+  >("COD");
 
   const applyAddress = (a: any, index: number) => {
     setShipping({
@@ -102,7 +223,10 @@ export default function CheckoutScreen() {
   };
 
   const hasAddress = Boolean(
-    shipping.fullName && shipping.addressLine && shipping.city && shipping.pincode,
+    shipping.fullName &&
+    shipping.addressLine &&
+    shipping.city &&
+    shipping.pincode,
   );
   // Pre-select the profile address, otherwise the first saved one
   useEffect(() => {
@@ -112,10 +236,25 @@ export default function CheckoutScreen() {
   }, [profileAddress, savedAddresses]);
 
   const paymentOptions = [
-    { key: "COD", label: "Cash on Delivery", desc: "Pay when your order arrives", disabled: false },
+    {
+      key: "COD",
+      label: "Cash on Delivery",
+      desc: "Pay when your order arrives",
+      disabled: false,
+    },
     { key: "UPI", label: "UPI", desc: "Coming soon", disabled: true },
-    { key: "CARD", label: "Credit / Debit Card", desc: "Coming soon", disabled: true },
-    { key: "NETBANKING", label: "Net Banking", desc: "Coming soon", disabled: true },
+    {
+      key: "CARD",
+      label: "Credit / Debit Card",
+      desc: "Coming soon",
+      disabled: true,
+    },
+    {
+      key: "NETBANKING",
+      label: "Net Banking",
+      desc: "Coming soon",
+      disabled: true,
+    },
   ] as const;
 
   useEffect(() => {
@@ -187,9 +326,9 @@ export default function CheckoutScreen() {
     isBuyNow === "true"
       ? buyNowTotal
       : items.reduce(
-        (sum, item) => sum + item.product.price * item.quantity,
-        0,
-      );
+          (sum, item) => sum + item.product.price * item.quantity,
+          0,
+        );
 
   const itemStoreIds = Array.from(
     new Set(
@@ -205,7 +344,11 @@ export default function CheckoutScreen() {
 
   const storeIds = activeStore?.mongoId ? [activeStore.mongoId] : itemStoreIds;
 
-    const validateShipping = () => {
+  const orderNote =
+    [remarks.trim(), shipping.note.trim()].filter(Boolean).join(" | ") ||
+    undefined;
+
+  const validateShipping = () => {
     if (
       !shipping.fullName ||
       !shipping.phone ||
@@ -252,24 +395,29 @@ export default function CheckoutScreen() {
           pincode: shipping.pincode.trim(),
           country: shipping.country.trim() || "India",
         },
-        note: shipping.note.trim() || undefined,
+        note: orderNote,
         paymentMethod: "COD",
       };
 
       console.log("[Checkout] Submitting Buy Now payload:", buyNowPayload);
       try {
         const response = await api.buyNow(token, buyNowPayload);
-        // Save address after successful Buy Now order
         if (user && user._id) {
           await addSavedAddress(user._id, buyNowPayload.deliveryAddress);
         }
-        console.log("[Checkout] Buy Now order created successfully:", response);
-        Alert.alert("Order placed", "Your order has been created.", [
-          {
-            text: "View orders",
-            onPress: () => router.replace("/(tabs)/orders"),
+        const orderId =
+          (response as any)?.order?._id ||
+          (response as any)?._id ||
+          (response as any)?.data?._id ||
+          `#${Date.now().toString().slice(-7)}`;
+        router.replace({
+          pathname: "/order-success" as any,
+          params: {
+            orderId: String(orderId).replace(/^#/, ""),
+            total: String(buyNowTotal),
+            itemName: buyNowProduct?.title ?? "Selected Product",
           },
-        ]);
+        });
       } catch (error) {
         console.error("[Checkout] Buy Now order failed:", error);
         Alert.alert(
@@ -360,14 +508,22 @@ export default function CheckoutScreen() {
         await addSavedAddress(user._id, checkoutPayload.deliveryAddress);
       }
       console.log("[Checkout] Order created", response);
-      // remove only this store's items; other stores' carts stay intact
-      for (const item of items) await removeItem(item);
-      Alert.alert("Order placed", "Your order has been created.", [
-        {
-          text: "View orders",
-          onPress: () => router.replace("/(tabs)/orders"),
+      const orderId =
+        (response as any)?.order?._id ||
+        (response as any)?._id ||
+        (response as any)?.data?._id ||
+        `#${Date.now().toString().slice(-7)}`;
+      router.replace({
+        pathname: "/order-success" as any,
+        params: {
+          orderId: String(orderId).replace(/^#/, ""),
+          total: String(total),
+          itemName:
+            items.length > 0
+              ? `${items[0].quantity}x ${"title" in items[0].product ? items[0].product.title : items[0].product.name}`
+              : "Order items",
         },
-      ]);
+      });
     } catch (error) {
       console.error("[Checkout] Order failed", {
         error,
@@ -421,17 +577,23 @@ export default function CheckoutScreen() {
 
   return (
     <SafeAreaView style={styles.screen} edges={["top"]}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
       <ScrollView
         contentContainerStyle={[
           styles.content,
-          { paddingBottom: 130 + insets.bottom },
+          { paddingBottom: (keyboardOpen ? 40 : 130) + insets.bottom },
         ]}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
         showsVerticalScrollIndicator={false}
       >
         {/* Header */}
         <View style={styles.topBar}>
-          <Pressable onPress={goBackOrHome} style={styles.backBtn} accessibilityLabel="Go back">
+          <Pressable
+            onPress={goBackOrHome}
+            style={styles.backBtn}
+            accessibilityLabel="Go back"
+          >
             <ThemedText style={styles.backChevron}>‹</ThemedText>
           </Pressable>
           <ThemedText style={styles.topTitle}>Checkout</ThemedText>
@@ -445,16 +607,21 @@ export default function CheckoutScreen() {
             {isBuyNow === "true" ? (
               <View style={styles.summaryLine}>
                 <ThemedText style={styles.summaryName} numberOfLines={1}>
-                  {numBuyNowQty}x {buyNowProduct ? buyNowProduct.title : "Selected Product"}
+                  {numBuyNowQty}x{" "}
+                  {buyNowProduct ? buyNowProduct.title : "Selected Product"}
                 </ThemedText>
-                <ThemedText style={styles.summaryPrice}>₹{buyNowTotal}</ThemedText>
+                <ThemedText style={styles.summaryPrice}>
+                  ₹{buyNowTotal}
+                </ThemedText>
               </View>
             ) : (
               items.map((item) => (
                 <View key={item.id} style={styles.summaryLine}>
                   <ThemedText style={styles.summaryName} numberOfLines={1}>
                     {item.quantity}x{" "}
-                    {"title" in item.product ? item.product.title : item.product.name}
+                    {"title" in item.product
+                      ? item.product.title
+                      : item.product.name}
                   </ThemedText>
                   <ThemedText style={styles.summaryPrice}>
                     ₹{item.product.price * item.quantity}
@@ -485,7 +652,9 @@ export default function CheckoutScreen() {
                     opt.disabled && styles.payRowDisabled,
                   ]}
                 >
-                  <View style={[styles.radio, selected && styles.radioSelected]}>
+                  <View
+                    style={[styles.radio, selected && styles.radioSelected]}
+                  >
                     {selected && <View style={styles.radioDot} />}
                   </View>
                   <View style={{ flex: 1 }}>
@@ -495,6 +664,32 @@ export default function CheckoutScreen() {
                 </Pressable>
               );
             })}
+          </View>
+        </View>
+
+        {/* Remarks */}
+        <View style={styles.card}>
+          <ThemedText style={styles.cardTitle}>Remarks</ThemedText>
+          <View style={styles.innerCard}>
+            <TextInput
+              multiline
+              value={remarks}
+              onChangeText={setRemarks}
+              onContentSizeChange={(e) =>
+                setRemarksHeight(
+                  Math.min(
+                    Math.max(e.nativeEvent.contentSize.height, 44),
+                    120,
+                  ),
+                )
+              }
+              placeholder="Add any remarks for your order (Optional)"
+              placeholderTextColor={muted}
+              scrollEnabled={remarksHeight >= 120}
+              textAlignVertical="top"
+              maxLength={300}
+              style={[styles.remarksInput, { height: remarksHeight }]}
+            />
           </View>
         </View>
 
@@ -528,12 +723,27 @@ export default function CheckoutScreen() {
 
           {!editingAddress && !hasAddress && (
             <Pressable style={styles.innerCard} onPress={openEditor}>
-              <ThemedText style={styles.addrName}>+ Add a delivery address</ThemedText>
+              <ThemedText style={styles.addrName}>
+                + Add a delivery address
+              </ThemedText>
             </Pressable>
           )}
 
           {editingAddress && (
             <View style={{ gap: 12 }}>
+              <Pressable
+                style={styles.locationBtn}
+                onPress={fillFromCurrentLocation}
+                disabled={locating}
+              >
+                {locating ? (
+                  <ActivityIndicator color={ink} />
+                ) : (
+                  <ThemedText style={styles.locationBtnText}>
+                    📍 USE MY CURRENT LOCATION
+                  </ThemedText>
+                )}
+              </Pressable>
               {(profileAddress || savedAddresses.length > 0) && (
                 <View style={{ gap: 10 }}>
                   {profileAddress && (
@@ -544,12 +754,15 @@ export default function CheckoutScreen() {
                       }}
                       style={[
                         styles.addressOption,
-                        selectedAddressIndex === -1 && styles.addressOptionSelected,
+                        selectedAddressIndex === -1 &&
+                          styles.addressOptionSelected,
                       ]}
                     >
                       <AddressRadio selected={selectedAddressIndex === -1} />
                       <View style={styles.addressOptionBadge}>
-                        <ThemedText style={styles.addressOptionBadgeText}>PROFILE</ThemedText>
+                        <ThemedText style={styles.addressOptionBadgeText}>
+                          PROFILE
+                        </ThemedText>
                       </View>
                       <ThemedText style={styles.addressOptionName}>
                         {profileAddress.fullName} – {profileAddress.phone}
@@ -559,7 +772,8 @@ export default function CheckoutScreen() {
                         {profileAddress.area ? `, ${profileAddress.area}` : ""}
                       </ThemedText>
                       <ThemedText style={styles.addressOptionLine}>
-                        {profileAddress.city}, {profileAddress.state} - {profileAddress.pincode}
+                        {profileAddress.city}, {profileAddress.state} -{" "}
+                        {profileAddress.pincode}
                       </ThemedText>
                     </Pressable>
                   )}
@@ -573,7 +787,8 @@ export default function CheckoutScreen() {
                       }}
                       style={[
                         styles.addressOption,
-                        selectedAddressIndex === idx && styles.addressOptionSelected,
+                        selectedAddressIndex === idx &&
+                          styles.addressOptionSelected,
                       ]}
                     >
                       <AddressRadio selected={selectedAddressIndex === idx} />
@@ -611,107 +826,157 @@ export default function CheckoutScreen() {
                     ]}
                   >
                     <AddressRadio selected={showForm} />
-                    <ThemedText style={styles.addressOptionName}>+ Add new address</ThemedText>
+                    <ThemedText style={styles.addressOptionName}>
+                      + Add new address
+                    </ThemedText>
                   </Pressable>
                 </View>
               )}
 
               {(showForm || !(profileAddress || savedAddresses.length > 0)) && (
-              <View style={styles.innerCard}>
-                <ThemedText style={styles.innerTitle}>Address Details</ThemedText>
-                <TextInput
-                  onChangeText={(t) => setShipping((s) => ({ ...s, fullName: t }))}
-                  placeholder="Full Name"
-                  placeholderTextColor={muted}
-                  style={styles.lineInput}
-                  value={shipping.fullName}
-                />
-                <TextInput
-                  keyboardType="phone-pad"
-                  onChangeText={(t) => setShipping((s) => ({ ...s, phone: t }))}
-                  placeholder="Phone Number"
-                  placeholderTextColor={muted}
-                  style={styles.lineInput}
-                  value={shipping.phone}
-                />
-                <TextInput
-                  onChangeText={(t) => setShipping((s) => ({ ...s, addressLine: t }))}
-                  placeholder="Address Line"
-                  placeholderTextColor={muted}
-                  style={styles.lineInput}
-                  value={shipping.addressLine}
-                />
-                <TextInput
-                  onChangeText={(t) => setShipping((s) => ({ ...s, area: t }))}
-                  placeholder="Area / Landmark (Optional)"
-                  placeholderTextColor={muted}
-                  style={styles.lineInput}
-                  value={shipping.area}
-                />
-                <View style={styles.row}>
+                <View style={styles.innerCard}>
+                  <ThemedText style={styles.innerTitle}>
+                    Address Details
+                  </ThemedText>
+                  <FieldLabel text="Full Name" required />
                   <TextInput
-                    onChangeText={(t) => setShipping((s) => ({ ...s, city: t }))}
-                    placeholder="City"
-                    placeholderTextColor={muted}
-                    style={[styles.lineInput, styles.half]}
-                    value={shipping.city}
-                  />
-                  <TextInput
-                    onChangeText={(t) => setShipping((s) => ({ ...s, state: t }))}
-                    placeholder="State"
-                    placeholderTextColor={muted}
-                    style={[styles.lineInput, styles.half]}
-                    value={shipping.state}
-                  />
-                </View>
-                <View style={styles.row}>
-                  <TextInput
-                    keyboardType="number-pad"
-                    maxLength={6}
-                    onChangeText={(t) => setShipping((s) => ({ ...s, pincode: t }))}
-                    placeholder="Pincode"
-                    placeholderTextColor={muted}
-                    style={[styles.lineInput, styles.half]}
-                    value={shipping.pincode}
-                  />
-                  <TextInput
-                    onChangeText={(t) => setShipping((s) => ({ ...s, country: t }))}
-                    placeholder="Country"
-                    placeholderTextColor={muted}
-                    style={[styles.lineInput, styles.half]}
-                    value={shipping.country}
-                  />
-                </View>
-                <TextInput
-                  onChangeText={(t) => setShipping((s) => ({ ...s, note: t }))}
-                  placeholder="Delivery Note (Optional)"
-                  placeholderTextColor={muted}
-                  style={styles.lineInput}
-                  value={shipping.note}
-                />
-                <Pressable
-                  style={styles.saveAddrBtn}
-                  onPress={() => {
-                    if (validateShipping()) {
-                      setEditingAddress(false);
-                      setShowForm(false);
+                    onChangeText={(t) =>
+                      setShipping((s) => ({ ...s, fullName: t }))
                     }
-                  }}
-                >
-                  <ThemedText style={styles.saveAddrText}>SAVE ADDRESS</ThemedText>
-                </Pressable>
-              </View>
+                    placeholder="Full Name"
+                    placeholderTextColor={muted}
+                    style={styles.lineInput}
+                    value={shipping.fullName}
+                  />
+                  <FieldLabel text="Phone Number" required />
+                  <TextInput
+                    keyboardType="phone-pad"
+                    onChangeText={(t) =>
+                      setShipping((s) => ({ ...s, phone: t }))
+                    }
+                    placeholder="Phone Number"
+                    placeholderTextColor={muted}
+                    style={styles.lineInput}
+                    value={shipping.phone}
+                  />
+                  <FieldLabel text="Address Line" required />
+                  <TextInput
+                    onChangeText={(t) =>
+                      setShipping((s) => ({ ...s, addressLine: t }))
+                    }
+                    placeholder="Address Line"
+                    placeholderTextColor={muted}
+                    style={styles.lineInput}
+                    value={shipping.addressLine}
+                  />
+                  <FieldLabel text="Area / Landmark" />
+                  <TextInput
+                    onChangeText={(t) =>
+                      setShipping((s) => ({ ...s, area: t }))
+                    }
+                    placeholder="Area / Landmark (Optional)"
+                    placeholderTextColor={muted}
+                    style={styles.lineInput}
+                    value={shipping.area}
+                  />
+                  <View style={styles.row}>
+                    <View style={styles.half}>
+                      <FieldLabel text="City" required />
+                      <TextInput
+                        onChangeText={(t) =>
+                          setShipping((s) => ({ ...s, city: t }))
+                        }
+                        placeholder="City"
+                        placeholderTextColor={muted}
+                        style={styles.lineInput}
+                        value={shipping.city}
+                      />
+                    </View>
+                    <View style={styles.half}>
+                      <FieldLabel text="State" required />
+                      <TextInput
+                        onChangeText={(t) =>
+                          setShipping((s) => ({ ...s, state: t }))
+                        }
+                        placeholder="State"
+                        placeholderTextColor={muted}
+                        style={styles.lineInput}
+                        value={shipping.state}
+                      />
+                    </View>
+                  </View>
+                  <View style={styles.row}>
+                    <View style={styles.half}>
+                      <FieldLabel text="Pincode" required />
+                      <TextInput
+                        keyboardType="number-pad"
+                        maxLength={6}
+                        onChangeText={(t) => {
+                          const digits = t.replace(/\D/g, "");
+                          setShipping((s) => ({ ...s, pincode: digits }));
+                          if (digits.length === 6) void lookupPincode(digits);
+                        }}
+                        placeholder="Pincode"
+                        placeholderTextColor={muted}
+                        style={styles.lineInput}
+                        value={shipping.pincode}
+                      />
+                    </View>
+                    <View style={styles.half}>
+                      <FieldLabel text="Country" />
+                      <TextInput
+                        onChangeText={(t) =>
+                          setShipping((s) => ({ ...s, country: t }))
+                        }
+                        placeholder="Country"
+                        placeholderTextColor={muted}
+                        style={styles.lineInput}
+                        value={shipping.country}
+                      />
+                    </View>
+                  </View>
+                  {pinLoading && (
+                    <ThemedText style={styles.pinHint}>
+                      Looking up city and state...
+                    </ThemedText>
+                  )}
+                  <FieldLabel text="Delivery Note" />
+                  <TextInput
+                    onChangeText={(t) =>
+                      setShipping((s) => ({ ...s, note: t }))
+                    }
+                    placeholder="Delivery Note (Optional)"
+                    placeholderTextColor={muted}
+                    style={styles.lineInput}
+                    value={shipping.note}
+                  />
+                  <Pressable
+                    style={styles.saveAddrBtn}
+                    onPress={() => {
+                      if (validateShipping()) {
+                        setEditingAddress(false);
+                        setShowForm(false);
+                      }
+                    }}
+                  >
+                    <ThemedText style={styles.saveAddrText}>
+                      SAVE ADDRESS
+                    </ThemedText>
+                  </Pressable>
+                </View>
               )}
             </View>
           )}
         </View>
       </ScrollView>
+      </KeyboardAvoidingView>
 
       {/* Bottom checkout button */}
       <View
         style={[
           styles.bottomBar,
           { paddingBottom: Math.max(insets.bottom, 16) + 8 },
+          keyboardOpen && { display: "none" },
         ]}
       >
         <Pressable
@@ -820,178 +1085,231 @@ const styles = StyleSheet.create({
   divider: { height: 1, backgroundColor: border, marginVertical: 4 },
   totalLabel: { color: ink, fontSize: 15, fontWeight: "900" },
   total: { color: ink, fontSize: 18, fontWeight: "900" },
-    primary: {
+  primary: {
     backgroundColor: "#F0552F",
-    borderRadius: 30,
+    borderRadius: 50,
     height: 56,
     alignItems: "center",
     justifyContent: "center",
   },
   disabledPrimary: { opacity: 0.6 },
-    primaryText: {
+  primaryText: {
     color: "#FFFFFF",
     fontSize: 15,
     fontWeight: "700",
   },
   addressPickerSection: {
-  gap: 12,
-  marginBottom: 22,
-},
-addressPickerTitle: {
-  color: ink,
-  fontSize: 13,
-  fontWeight: "800",
-  letterSpacing: 1.2,
-  textTransform: "uppercase",
-  marginBottom: 4,
-},
-formSectionLabel: {
-  color: muted,
-  fontSize: 12,
-  fontWeight: "700",
-  marginBottom: 4,
-  marginTop: 4,
-},
-addressOption: {
-  borderRadius: 16,
-  padding: 14,
-  paddingRight: 48,
-  gap: 4,
-  backgroundColor: "#FFFFFF",
-  borderWidth: 1.5,
-  borderColor: "#EDEDED",
-},
-addressOptionSelected: {
-  backgroundColor: "#FFF5F2",
-  borderColor: "#F0552F",
-},
-addressRadioPos: {
-  position: "absolute",
-  top: 14,
-  right: 14,
-},
-addressOptionBadge: {
-  alignSelf: "flex-start",
-  backgroundColor: "#17211D",
-  paddingHorizontal: 8,
-  paddingVertical: 3,
-  borderRadius: 6,
-  marginBottom: 4,
-},
-addressOptionBadgeText: {
-  color: "#FFFFFF",
-  fontSize: 9,
-  fontWeight: "800",
-  letterSpacing: 1.2,
-},
-addressOptionName: {
-  color: ink,
-  fontSize: 14,
-  fontWeight: "800",
-},
-addressOptionLine: {
-  color: "#6B6B6B",
-  fontSize: 12.5,
-  lineHeight: 18,
-},
-topBar: {
-  flexDirection: "row",
-  alignItems: "center",
-  justifyContent: "space-between",
-  marginBottom: 16,
-},
-backBtn: {
-  width: 40,
-  height: 40,
-  borderRadius: 20,
-  backgroundColor: "#E8E8E8",
-  alignItems: "center",
-  justifyContent: "center",
-},
-backChevron: { color: ink, fontSize: 26, lineHeight: 28, fontWeight: "600" },
-topTitle: { color: ink, fontSize: 18, fontWeight: "800" },
-card: {
-  backgroundColor: "#E9E9E9",
-  borderRadius: 28,
-  padding: 14,
-  marginBottom: 16,
-},
-cardTitle: { color: ink, fontSize: 16, fontWeight: "800", marginBottom: 12, marginLeft: 4 },
-innerCard: {
-  backgroundColor: "#FFFFFF",
-  borderRadius: 20,
-  padding: 16,
-},
-innerTitle: { color: ink, fontSize: 15, fontWeight: "800", marginBottom: 12 },
-summaryLine: {
-  flexDirection: "row",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 12,
-  paddingVertical: 4,
-},
-summaryName: { flex: 1, color: ink, fontSize: 13, fontWeight: "600" },
-summaryPrice: { color: ink, fontSize: 14, fontWeight: "800" },
-summaryDivider: { height: 1, backgroundColor: "#EEEEEE", marginVertical: 8 },
-payRow: {
-  flexDirection: "row",
-  alignItems: "center",
-  gap: 12,
-  padding: 14,
-  borderRadius: 14,
-  backgroundColor: "#F6F6F6",
-  borderWidth: 1.5,
-  borderColor: "transparent",
-  marginBottom: 8,
-},
-payRowSelected: { borderColor: "#F0552F", backgroundColor: "#FFF5F2" },
-payRowDisabled: { opacity: 0.5 },
-radio: {
-  width: 20,
-  height: 20,
-  borderRadius: 10,
-  borderWidth: 2,
-  borderColor: "#BBBBBB",
-  alignItems: "center",
-  justifyContent: "center",
-},
-radioSelected: { borderColor: "#F0552F" },
-radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: "#F0552F" },
-payLabel: { color: ink, fontSize: 14, fontWeight: "700" },
-payDesc: { color: muted, fontSize: 12, marginTop: 2 },
-addressHeader: {
-  flexDirection: "row",
-  alignItems: "center",
-  justifyContent: "space-between",
-},
-changeLink: { color: "#F0552F", fontSize: 14, fontWeight: "800", marginBottom: 12 },
-addrName: { color: ink, fontSize: 14, fontWeight: "800" },
-addrLine: { color: muted, fontSize: 13, lineHeight: 19, marginTop: 2 },
-lineInput: {
-  color: ink,
-  fontSize: 15,
-  fontWeight: "600",
-  paddingVertical: 12,
-  borderBottomWidth: 1,
-  borderBottomColor: "#E5E5E5",
-},
-saveAddrBtn: {
-  marginTop: 16,
-  height: 46,
-  borderRadius: 23,
-  backgroundColor: ink,
-  alignItems: "center",
-  justifyContent: "center",
-},
-saveAddrText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800", letterSpacing: 1.2 },
-bottomBar: {
-  position: "absolute",
-  left: 0,
-  right: 0,
-  bottom: 0,
-  paddingHorizontal: 16,
-  paddingTop: 12,
-  paddingBottom: 24,
-  backgroundColor: "#F2F2F2",
-},
+    gap: 12,
+    marginBottom: 22,
+  },
+  addressPickerTitle: {
+    color: ink,
+    fontSize: 13,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+    marginBottom: 4,
+  },
+  formSectionLabel: {
+    color: muted,
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 4,
+    marginTop: 4,
+  },
+  addressOption: {
+    borderRadius: 16,
+    padding: 14,
+    paddingRight: 48,
+    gap: 4,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1.5,
+    borderColor: "#EDEDED",
+  },
+  addressOptionSelected: {
+    backgroundColor: "#FFF5F2",
+    borderColor: "#F0552F",
+  },
+  addressRadioPos: {
+    position: "absolute",
+    top: 14,
+    right: 14,
+  },
+  addressOptionBadge: {
+    alignSelf: "flex-start",
+    backgroundColor: "#e2bd19",
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    marginBottom: 4,
+  },
+  addressOptionBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+  },
+  addressOptionName: {
+    color: ink,
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  addressOptionLine: {
+    color: "#6B6B6B",
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  topBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 16,
+  },
+  backBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "#E8E8E8",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  backChevron: { color: ink, fontSize: 26, lineHeight: 28, fontWeight: "600" },
+  topTitle: { color: ink, fontSize: 18, fontWeight: "800" },
+  card: {
+    backgroundColor: "#E9E9E9",
+    borderRadius: 28,
+    padding: 14,
+    marginBottom: 16,
+  },
+  cardTitle: {
+    color: ink,
+    fontSize: 16,
+    fontWeight: "800",
+    marginBottom: 12,
+    marginLeft: 4,
+  },
+  innerCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    padding: 16,
+  },
+  innerTitle: { color: ink, fontSize: 15, fontWeight: "800", marginBottom: 12 },
+  summaryLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingVertical: 4,
+  },
+  summaryName: { flex: 1, color: ink, fontSize: 13, fontWeight: "600" },
+  summaryPrice: { color: ink, fontSize: 14, fontWeight: "800" },
+  summaryDivider: { height: 1, backgroundColor: "#EEEEEE", marginVertical: 8 },
+  payRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: "#F6F6F6",
+    borderWidth: 1.5,
+    borderColor: "transparent",
+    marginBottom: 8,
+  },
+  payRowSelected: { borderColor: "#F0552F", backgroundColor: "#FFF5F2" },
+  payRowDisabled: { opacity: 0.5 },
+  radio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: "#BBBBBB",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  radioSelected: { borderColor: "#F0552F" },
+  radioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: "#F0552F",
+  },
+  payLabel: { color: ink, fontSize: 14, fontWeight: "700" },
+  payDesc: { color: muted, fontSize: 12, marginTop: 2 },
+  addressHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  changeLink: {
+    color: "#F0552F",
+    fontSize: 14,
+    fontWeight: "800",
+    marginBottom: 12,
+  },
+  addrName: { color: ink, fontSize: 14, fontWeight: "800" },
+  addrLine: { color: muted, fontSize: 13, lineHeight: 19, marginTop: 2 },
+  lineInput: {
+    color: ink,
+    fontSize: 15,
+    fontWeight: "600",
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#E5E5E5",
+  },
+  fieldLabel: {
+    color: muted,
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 10,
+  },
+  requiredStar: { color: "#E53935", fontWeight: "800" },
+  locationBtn: {
+    height: 46,
+    borderRadius: 53,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1.5,
+    borderColor: "#F0552F",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  locationBtnText: {
+    color: "#F0552F",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+  },
+  pinHint: { color: muted, fontSize: 12, marginTop: 8 },
+  remarksInput: {
+    color: ink,
+    fontSize: 14,
+    fontWeight: "500",
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+    minHeight: 44,
+    maxHeight: 120,
+  },
+  saveAddrBtn: {
+    marginTop: 16,
+    height: 46,
+    borderRadius: 53,
+    backgroundColor: "#f8c9b1",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  saveAddrText: {
+    color: "#000000",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+  },
+  bottomBar: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 24,
+    backgroundColor: "#F2F2F2",
+  },
 });

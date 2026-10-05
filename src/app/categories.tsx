@@ -495,7 +495,7 @@ const styles = StyleSheet.create({
   mainHeaderCount: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#748078",
+    color: "#c4bba5",
     letterSpacing: 0.5,
   },
 
@@ -508,7 +508,7 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 13,
-    color: "#748078",
+    color: "#edd09e",
     textAlign: "center",
     fontWeight: "600",
   },

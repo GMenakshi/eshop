@@ -1,15 +1,26 @@
-import { Image } from "expo-image";
-import { router } from "expo-router";
-import { SymbolView } from "expo-symbols";
-import { useMemo, useState, useEffect } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { ProductRail } from "@/components/product-rail";
 import { ThemedText } from "@/components/themed-text";
 import { useAuth } from "@/context/auth-context";
 import { useCart, type CartItem } from "@/context/cart-context";
-import { useStore } from "@/lib/store-context";
 import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
-import { ProductRail } from "@/components/product-rail";
+import { useStore } from "@/lib/store-context";
+import { Image } from "expo-image";
+import { router } from "expo-router";
+import { SymbolView } from "expo-symbols";
+import { useEffect, useState } from "react";
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 
 const ink = "#1A1A1A";
 const mutedInk = "#999999";
@@ -48,8 +59,14 @@ export default function CartScreen() {
       .catch(() => undefined);
   }, [storeId]);
 
-  const subtotal = items.reduce((sum, item) => sum + unitPrice(item) * (item.quantity || 1), 0);
-  const totalOriginal = items.reduce((sum, item) => sum + originalPrice(item) * (item.quantity || 1), 0);
+  const subtotal = items.reduce(
+    (sum, item) => sum + unitPrice(item) * (item.quantity || 1),
+    0,
+  );
+  const totalOriginal = items.reduce(
+    (sum, item) => sum + originalPrice(item) * (item.quantity || 1),
+    0,
+  );
   const totalDiscount = totalOriginal - subtotal;
   const payable = subtotal;
 
@@ -68,13 +85,15 @@ export default function CartScreen() {
               for (const item of unavailableItems) {
                 await removeItem(item);
               }
-              const remaining = items.filter((item) => item.isAvailable !== false);
+              const remaining = items.filter(
+                (item) => item.isAvailable !== false,
+              );
               if (remaining.length > 0) {
                 router.push("/checkout");
               }
             },
           },
-        ]
+        ],
       );
       return;
     }
@@ -83,52 +102,81 @@ export default function CartScreen() {
 
   const renderItem = (item: CartItem, index: number) => {
     const { quantity, product } = item;
-    const itemKey = item.cartItemId || item.id || `cart-item-${index}`;
-    const imageUri = product.image ? (apiImageUrl(product.image) ?? product.image) : undefined;
+    const itemKey =
+      item.cartItemId || item.lineId || item.id || `cart-item-${index}`;
+    const imageUri = product.image
+      ? (apiImageUrl(product.image) ?? product.image)
+      : undefined;
     const isUnavailable = item.isAvailable === false;
-    
+
     // Using mock reviews to match design since API doesn't provide them per cart item easily
     const rating = 4.8;
     const reviewCount = 2320;
 
     return (
-      <View style={[styles.itemCard, isUnavailable && styles.unavailableCard]} key={itemKey}>
+      <View
+        style={[styles.itemCard, isUnavailable && styles.unavailableCard]}
+        key={itemKey}
+      >
         <View style={styles.itemImageWrap}>
           {imageUri ? (
-            <Image source={{ uri: imageUri }} style={styles.itemImage} contentFit="contain" />
+            <Image
+              source={{ uri: imageUri }}
+              style={styles.itemImage}
+              contentFit="contain"
+            />
           ) : (
             <View style={styles.itemImagePlaceholder} />
           )}
         </View>
         <View style={styles.itemInfo}>
           <View style={styles.itemHeaderRow}>
-            <ThemedText style={styles.productName} numberOfLines={1}>{productName(product)}</ThemedText>
+            <ThemedText style={styles.productName} numberOfLines={1}>
+              {productName(product)}
+            </ThemedText>
             <Pressable
               accessibilityLabel="Remove item"
               onPress={() => removeItem(item)}
               hitSlop={8}
             >
-              <SymbolView name={{ ios: "trash", android: "delete", web: "delete" }} size={16} tintColor="#E53935" />
+              <SymbolView
+                name={{ ios: "trash", android: "delete", web: "delete" }}
+                size={16}
+                tintColor="#E53935"
+              />
             </Pressable>
           </View>
+          {!!item.variantLabel && (
+            <ThemedText style={styles.variantLabel} numberOfLines={1}>
+              {item.variantLabel}
+            </ThemedText>
+          )}
           {isUnavailable ? (
             <View style={styles.unavailableBadge}>
-              <Text style={styles.unavailableBadgeText}>Out of Stock / Unavailable</Text>
+              <Text style={styles.unavailableBadgeText}>
+                Out of Stock / Unavailable
+              </Text>
             </View>
           ) : (
             <>
               <View style={styles.ratingRow}>
-                <ThemedText style={styles.ratingText}>{rating} ({reviewCount} Reviews)</ThemedText>
+                <ThemedText style={styles.ratingText}>
+                  {rating} ({reviewCount} Reviews)
+                </ThemedText>
               </View>
               <View style={styles.starsRow}>
                 {[1, 2, 3, 4, 5].map((s) => (
-                  <Text key={s} style={styles.starIcon}>★</Text>
+                  <Text key={s} style={styles.starIcon}>
+                    ★
+                  </Text>
                 ))}
               </View>
             </>
           )}
           <View style={styles.priceRow}>
-            <ThemedText style={styles.price}>₹{unitPrice(item).toFixed(2)}</ThemedText>
+            <ThemedText style={styles.price}>
+              ₹{unitPrice(item).toFixed(2)}
+            </ThemedText>
             <View style={styles.quantityControl}>
               <Pressable
                 accessibilityLabel="Decrease quantity"
@@ -140,6 +188,7 @@ export default function CartScreen() {
                   }
                 }}
                 style={styles.qtyBtn}
+                hitSlop={6}
               >
                 <ThemedText style={styles.qtyBtnText}>-</ThemedText>
               </Pressable>
@@ -148,6 +197,7 @@ export default function CartScreen() {
                 accessibilityLabel="Increase quantity"
                 onPress={() => changeQuantity(item, 1)}
                 style={styles.qtyBtnAdd}
+                hitSlop={6}
               >
                 <ThemedText style={styles.qtyBtnAddText}>+</ThemedText>
               </Pressable>
@@ -162,20 +212,43 @@ export default function CartScreen() {
     <SafeAreaView style={styles.screen} edges={["top"]}>
       {/* ─── Header ─── */}
       <View style={styles.header}>
-        <Pressable accessibilityLabel="Go back" onPress={() => router.back()} style={styles.headerBtn}>
-          <SymbolView name={{ ios: "arrow.left", android: "arrow_back", web: "arrow_back" }} size={20} tintColor={ink} />
+        <Pressable
+          accessibilityLabel="Go back"
+          onPress={() => router.back()}
+          style={styles.headerBtn}
+        >
+          <SymbolView
+            name={{
+              ios: "arrow.left",
+              android: "arrow_back",
+              web: "arrow_back",
+            }}
+            size={20}
+            tintColor={ink}
+          />
         </Pressable>
         <ThemedText style={styles.headerTitle}>My Cart</ThemedText>
         <View style={styles.headerBtn}>
-          <SymbolView name={{ ios: "bag", android: "shopping_bag", web: "shopping_bag" }} size={20} tintColor={ink} />
+          <SymbolView
+            name={{ ios: "bag", android: "shopping_bag", web: "shopping_bag" }}
+            size={20}
+            tintColor={ink}
+          />
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
         {items.length === 0 ? (
           <View style={styles.emptyState}>
-            <ThemedText style={styles.emptyTitle}>Your cart is empty</ThemedText>
-            <ThemedText style={styles.mutedText}>Start adding some items!</ThemedText>
+            <ThemedText style={styles.emptyTitle}>
+              Your cart is empty
+            </ThemedText>
+            <ThemedText style={styles.mutedText}>
+              Start adding some items!
+            </ThemedText>
           </View>
         ) : (
           <>
@@ -203,31 +276,63 @@ export default function CartScreen() {
               <View style={styles.billCard}>
                 <View style={styles.billRow}>
                   <View style={styles.billLabelGroup}>
-                    <ThemedText style={styles.billLabel}>Total item price</ThemedText>
-                    <SymbolView name={{ ios: "chevron.down", android: "expand_more", web: "expand_more" }} size={12} tintColor={ink} />
+                    <ThemedText style={styles.billLabel}>
+                      Total item price
+                    </ThemedText>
+                    <SymbolView
+                      name={{
+                        ios: "chevron.down",
+                        android: "expand_more",
+                        web: "expand_more",
+                      }}
+                      size={12}
+                      tintColor={ink}
+                    />
                   </View>
-                  <ThemedText style={styles.billValue}>₹{totalOriginal.toFixed(2)}</ThemedText>
+                  <ThemedText style={styles.billValue}>
+                    ₹{totalOriginal.toFixed(2)}
+                  </ThemedText>
                 </View>
                 <View style={styles.billRow}>
                   <View style={styles.billLabelGroup}>
-                    <ThemedText style={styles.billLabel}>Total discount</ThemedText>
-                    <SymbolView name={{ ios: "chevron.down", android: "expand_more", web: "expand_more" }} size={12} tintColor={ink} />
+                    <ThemedText style={styles.billLabel}>
+                      Total discount
+                    </ThemedText>
+                    <SymbolView
+                      name={{
+                        ios: "chevron.down",
+                        android: "expand_more",
+                        web: "expand_more",
+                      }}
+                      size={12}
+                      tintColor={ink}
+                    />
                   </View>
-                  <ThemedText style={styles.billValue}>-₹{totalDiscount.toFixed(2)}</ThemedText>
+                  <ThemedText style={styles.billValue}>
+                    -₹{totalDiscount.toFixed(2)}
+                  </ThemedText>
                 </View>
                 <View style={[styles.billRow, styles.billRowLast]}>
-                  <ThemedText style={styles.billTotalLabel}>Total payable</ThemedText>
-                  <ThemedText style={styles.billTotalValue}>₹{payable.toFixed(2)}</ThemedText>
+                  <ThemedText style={styles.billTotalLabel}>
+                    Total payable
+                  </ThemedText>
+                  <ThemedText style={styles.billTotalValue}>
+                    ₹{payable.toFixed(2)}
+                  </ThemedText>
                 </View>
               </View>
             </View>
           </>
         )}
-        
+
         {/* Restore API driven product rail */}
         {products.length > 0 && (
           <View style={{ marginTop: 20 }}>
-            <ProductRail title="Keep exploring" products={products} />
+            <ProductRail
+              title="Keep exploring"
+              products={products}
+              onSeeAll={() => router.push("/products")}
+            />
           </View>
         )}
       </ScrollView>
@@ -268,7 +373,7 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 18, fontWeight: "700", color: ink },
   content: { paddingHorizontal: 20, paddingBottom: 40, paddingTop: 10 },
-  
+
   itemList: { gap: 16 },
   itemCard: {
     backgroundColor: surface,
@@ -292,7 +397,12 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   itemImage: { width: "80%", height: "80%" },
-  itemImagePlaceholder: { width: "100%", height: "100%", backgroundColor: border, borderRadius: 16 },
+  itemImagePlaceholder: {
+    width: "100%",
+    height: "100%",
+    backgroundColor: border,
+    borderRadius: 16,
+  },
   itemInfo: { flex: 1, justifyContent: "center" },
   itemHeaderRow: {
     flexDirection: "row",
@@ -300,7 +410,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 4,
   },
-  productName: { flex: 1, fontSize: 16, fontWeight: "700", color: ink, marginRight: 8 },
+  productName: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: "700",
+    color: ink,
+    marginRight: 8,
+  },
+  variantLabel: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: mutedInk,
+    marginBottom: 6,
+  },
   unavailableBadge: {
     backgroundColor: "#FFEBEE",
     paddingHorizontal: 8,
@@ -318,40 +440,46 @@ const styles = StyleSheet.create({
   ratingText: { fontSize: 12, color: mutedInk, fontWeight: "500" },
   starsRow: { flexDirection: "row", gap: 2, marginBottom: 12 },
   starIcon: { color: "#F5A623", fontSize: 12 },
-  
+
   priceRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
   price: { fontSize: 18, fontWeight: "800", color: ink },
-  
+
   quantityControl: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
   },
   qtyBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     borderWidth: 1,
     borderColor: "#DCDCDC",
     alignItems: "center",
     justifyContent: "center",
   },
-  qtyBtnText: { fontSize: 14, fontWeight: "600", color: mutedInk },
-  qtyValue: { fontSize: 14, fontWeight: "700", color: ink },
+  qtyBtnText: { fontSize: 20, lineHeight: 24, fontWeight: "600", color: mutedInk },
+  qtyValue: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: ink,
+    minWidth: 20,
+    textAlign: "center",
+  },
   qtyBtnAdd: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     backgroundColor: ink,
     alignItems: "center",
     justifyContent: "center",
   },
-  qtyBtnAddText: { fontSize: 14, fontWeight: "600", color: surface },
-  
+  qtyBtnAddText: { fontSize: 20, lineHeight: 24, fontWeight: "600", color: surface },
+
   promoContainer: {
     flexDirection: "row",
     alignItems: "center",
@@ -369,15 +497,21 @@ const styles = StyleSheet.create({
     fontWeight: "500",
   },
   applyBtn: {
-    backgroundColor: accent,
+    backgroundColor: "#edad78",
     paddingHorizontal: 24,
     paddingVertical: 14,
     borderRadius: 24,
   },
-  applyBtnText: { color: surface, fontSize: 14, fontWeight: "700" },
+  applyBtnText: { color: accent, fontSize: 14, fontWeight: "700" },
 
   billContainer: { marginTop: 28 },
-  billTitle: { fontSize: 15, fontWeight: "700", color: ink, marginBottom: 12, paddingLeft: 4 },
+  billTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: ink,
+    marginBottom: 12,
+    paddingLeft: 4,
+  },
   billCard: {
     backgroundColor: surface,
     borderRadius: 20,
@@ -409,14 +543,14 @@ const styles = StyleSheet.create({
     backgroundColor: bgLight,
   },
   buyBtn: {
-    backgroundColor: accent,
+    backgroundColor: "#edad78",
     borderRadius: 30,
     paddingVertical: 18,
     alignItems: "center",
     justifyContent: "center",
   },
   buyBtnText: { color: surface, fontSize: 16, fontWeight: "700" },
-  
+
   emptyState: { paddingVertical: 80, alignItems: "center" },
   emptyTitle: { fontSize: 20, fontWeight: "700", color: ink, marginBottom: 8 },
   mutedText: { fontSize: 15, color: mutedInk },

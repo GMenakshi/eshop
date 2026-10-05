@@ -1,26 +1,35 @@
 import {
-  createContext,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-  type PropsWithChildren,
+    createContext,
+    useContext,
+    useEffect,
+    useRef,
+    useState,
+    type PropsWithChildren,
 } from "react";
 
 import { catalog } from "@/constants/catalog";
 import { useAuth } from "@/context/auth-context";
-import { api, type ApiCartItem, type ApiCartResponse, type ApiProduct } from "@/lib/api";
+import {
+    api,
+    type ApiCartItem,
+    type ApiCartResponse,
+    type ApiProduct,
+    type ApiSizeVariant,
+    type ApiVariant,
+} from "@/lib/api";
 import { useStore } from "@/lib/store-context";
 
 type CartProduct = ApiProduct | (typeof catalog)[keyof typeof catalog];
 export type CartItem = {
   id: string;
+  lineId?: string;
   cartItemId?: string;
   storeId?: string;
-  storeName?: string;      
-  isAvailable?: boolean;   
+  storeName?: string;
+  isAvailable?: boolean;
   quantity: number;
   product: CartProduct;
+  variantLabel?: string;
 };
 type CartContextValue = {
   items: CartItem[];
@@ -58,6 +67,136 @@ function cartProductId(item: ApiCartItem) {
   return typeof value === "string" ? value : (value?._id ?? value?.id);
 }
 
+const selectedVariantId = (product: CartProduct) =>
+  "variantId" in product && product.variantId ? product.variantId : undefined;
+
+const selectedColorVariantId = (product: CartProduct) =>
+  "colorVariantId" in product && typeof product.colorVariantId === "string"
+    ? product.colorVariantId
+    : undefined;
+
+const cartLineId = (
+  productId: string,
+  variantId?: string,
+  colorVariantId?: string,
+  size?: string,
+  weight?: string | number,
+) => {
+  const options = [size, weight].filter(Boolean).join(":");
+  const variantKey = variantId ?? colorVariantId ?? (options || "default");
+  return `${productId}:${variantKey}`;
+};
+
+const getCartItemLineId = (item: CartItem) => item.lineId ?? item.id;
+
+const productVariantLabel = (product: CartProduct) => {
+  const color = "color" in product ? String(product.color ?? "").trim() : "";
+  const size = "size" in product ? product.size : undefined;
+  const weight = "weight" in product ? product.weight : undefined;
+  const catalogVariant =
+    "variant" in product && typeof product.variant === "string"
+      ? product.variant
+      : "";
+  const options = [
+    color ? `Color: ${color}` : "",
+    size ? `Size: ${size}` : "",
+    weight ? `Weight: ${weight}` : "",
+  ].filter(Boolean);
+  return options.join(" · ") || catalogVariant;
+};
+
+function applyCartVariant(product: ApiProduct, item: ApiCartItem): ApiProduct {
+  const variantId = item.variantId;
+  let matchedGroup: ApiVariant | undefined;
+  let matchedSize: ApiSizeVariant | undefined;
+
+  for (const group of product.variants ?? []) {
+    const sizeVariant = group.sizeVariants?.find(
+      (variant) =>
+        Boolean(variantId) &&
+        (variant._id === variantId || variant.id === variantId),
+    );
+    if (sizeVariant) {
+      matchedGroup = group;
+      matchedSize = sizeVariant;
+      break;
+    }
+    if (variantId && (group._id === variantId || group.id === variantId)) {
+      matchedGroup = group;
+      break;
+    }
+  }
+
+  if (
+    !matchedGroup &&
+    (item.size || item.weight || item.color || item.colorVariantId)
+  ) {
+    matchedGroup = product.variants?.find(
+      (group) =>
+        (item.colorVariantId
+          ? group._id === item.colorVariantId ||
+            group.id === item.colorVariantId
+          : !item.color || group.color === item.color) &&
+        (!item.size && !item.weight
+          ? true
+          : group.sizeVariants?.some(
+              (variant) =>
+                (!item.size || variant.size === item.size) &&
+                (!item.weight || variant.weight === item.weight),
+            )),
+    );
+    matchedSize = matchedGroup?.sizeVariants?.find(
+      (variant) =>
+        (!item.size || variant.size === item.size) &&
+        (!item.weight || variant.weight === item.weight),
+    );
+  }
+
+  const offerPrice = Number(
+    item.offerPrice ??
+      matchedSize?.offerPrice ??
+      matchedGroup?.offerPrice ??
+      product.price,
+  );
+  const originalPrice = Number(
+    item.mrp ??
+      matchedSize?.mrp ??
+      matchedGroup?.mrp ??
+      product.originalPrice ??
+      offerPrice,
+  );
+  const image = matchedGroup?.images?.[0] ?? product.image;
+  const resolvedVariantId =
+    variantId ??
+    matchedSize?._id ??
+    matchedSize?.id ??
+    matchedGroup?._id ??
+    matchedGroup?.id ??
+    item.product?.variantId ??
+    product.variantId;
+
+  return {
+    ...product,
+    image,
+    images: image ? [image] : product.images,
+    price: Number.isFinite(offerPrice) ? offerPrice : product.price,
+    originalPrice: Number.isFinite(originalPrice)
+      ? originalPrice
+      : product.originalPrice,
+    size:
+      item.size ??
+      matchedSize?.size ??
+      (matchedGroup ? undefined : product.size),
+    weight:
+      item.weight ??
+      matchedSize?.weight ??
+      (matchedGroup ? undefined : product.weight),
+    variantId: resolvedVariantId,
+    color: item.color ?? matchedGroup?.color,
+    colorVariantId: item.colorVariantId ?? matchedGroup?._id,
+  };
+}
+
 export const cartItemStoreId = (item: CartItem): string =>
   item.storeId ??
   ("storeId" in item.product ? item.product.storeId : undefined) ??
@@ -68,7 +207,7 @@ export function CartProvider({ children }: PropsWithChildren) {
   const { storeId, activeStore } = useStore();
   const [items, setItems] = useState<CartItem[]>([]);
   const [cartId, setCartId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true); 
+  const [loading, setLoading] = useState(true);
   const itemsRef = useRef<CartItem[]>([]);
 
   itemsRef.current = items;
@@ -97,7 +236,8 @@ export function CartProvider({ children }: PropsWithChildren) {
         const cartValue = response.cart ?? response.data;
         const cartObject =
           cartValue && !Array.isArray(cartValue) ? cartValue : undefined;
-        const remoteItems = cartItemsFromResponse(response).filter(inActiveStore);
+        const remoteItems =
+          cartItemsFromResponse(response).filter(inActiveStore);
 
         const remoteIds = new Set(
           remoteItems.map(
@@ -112,8 +252,9 @@ export function CartProvider({ children }: PropsWithChildren) {
         for (const item of guestItems) {
           if ("_id" in item.product && !remoteIds.has(item.product._id)) {
             try {
-                            const firstVariant =
-                "variants" in item.product && Array.isArray(item.product.variants)
+              const firstVariant =
+                "variants" in item.product &&
+                Array.isArray(item.product.variants)
                   ? item.product.variants[0]
                   : undefined;
 
@@ -150,8 +291,16 @@ export function CartProvider({ children }: PropsWithChildren) {
           hydratedCartValue && !Array.isArray(hydratedCartValue)
             ? hydratedCartValue
             : undefined;
-        const hydratedRemoteItems = cartItemsFromResponse(hydratedResponse).filter(inActiveStore);
-         console.log("[Cart] hydrated items", hydratedRemoteItems.map(i => ({ name: i.name, storeName: i.storeName, storeId: i.storeId })));
+        const hydratedRemoteItems =
+          cartItemsFromResponse(hydratedResponse).filter(inActiveStore);
+        console.log(
+          "[Cart] hydrated items",
+          hydratedRemoteItems.map((i) => ({
+            name: i.name,
+            storeName: i.storeName,
+            storeId: i.storeId,
+          })),
+        );
         setCartId(
           hydratedResponse.cartId ??
             hydratedResponse._id ??
@@ -187,7 +336,7 @@ export function CartProvider({ children }: PropsWithChildren) {
                 size: item.size ?? undefined,
                 weight: item.weight ?? undefined,
                 productCode: item.productCode,
-                storeId: item.storeId, 
+                storeId: item.storeId,
               };
             }
             if (productId && (Boolean(listProduct) || !item.name)) {
@@ -204,20 +353,33 @@ export function CartProvider({ children }: PropsWithChildren) {
               }
             }
 
-return product
-  ? {
-      id: productId ?? product._id,
-      cartItemId: item._id,
-      storeId: item.storeId ?? product.storeId,
-      storeName: item.storeName,
-      isAvailable: item.isAvailable !== false,
-      quantity: item.quantity,
-      product,
-    }
-  : null;
+            const variantProduct = product
+              ? applyCartVariant(product, item)
+              : null;
+            return variantProduct
+              ? {
+                  id: productId ?? variantProduct._id,
+                  lineId:
+                    item._id ??
+                    cartLineId(
+                      productId ?? variantProduct._id,
+                      variantProduct.variantId,
+                      variantProduct.colorVariantId,
+                      variantProduct.size,
+                      variantProduct.weight,
+                    ),
+                  cartItemId: item._id,
+                  storeId: item.storeId ?? variantProduct.storeId,
+                  storeName: item.storeName,
+                  isAvailable: item.isAvailable !== false,
+                  quantity: item.quantity,
+                  product: variantProduct,
+                  variantLabel: productVariantLabel(variantProduct),
+                }
+              : null;
           }),
         );
-                setItems(
+        setItems(
           hydratedItems.flatMap((item) =>
             item && item.id
               ? [{ ...item, product: item.product as CartProduct }]
@@ -234,7 +396,7 @@ return product
           itemCount: hydratedItems.filter(Boolean).length,
         });
       })
-            .catch((error) => {
+      .catch((error) => {
         console.error("[Cart] Backend cart load failed", error);
         if ((error as { status?: number })?.status === 401) {
           console.warn("[Auth] Cart token was rejected; signing out.");
@@ -249,14 +411,15 @@ return product
         setLoading(false);
       });
   }, [token, storeId, activeStore?.mongoId, signOut]);
-  
+
   const addItem = async (product: CartProduct, quantity = 1) => {
     if (!token) {
       throw new Error("Please sign in to add products to your cart.");
     }
+    let persistedCartItem: ApiCartItem | undefined;
     if (token && "_id" in product) {
       try {
-               const firstVariant =
+        const firstVariant =
           "variants" in product && Array.isArray(product.variants)
             ? product.variants[0]
             : undefined;
@@ -280,7 +443,10 @@ return product
                 fetchedProduct.variants[0]._id ?? fetchedProduct.variants[0].id;
             }
           } catch (fetchErr) {
-            console.warn("[Cart] Failed to resolve variantId from API", fetchErr);
+            console.warn(
+              "[Cart] Failed to resolve variantId from API",
+              fetchErr,
+            );
           }
         }
 
@@ -294,18 +460,25 @@ return product
         const savedObject =
           savedValue && !Array.isArray(savedValue) ? savedValue : undefined;
         const savedItems = cartItemsFromResponse(savedCart);
-        const savedItem = savedItems.find(
+        const sameProductItems = savedItems.filter(
           (item) => cartProductId(item) === product._id,
         );
+        persistedCartItem =
+          sameProductItems.find((item) => item.variantId === variantId) ??
+          sameProductItems.find(
+            (item) =>
+              item.size === product.size && item.weight === product.weight,
+          ) ??
+          (sameProductItems.length === 1 ? sameProductItems[0] : undefined);
         console.log("[Cart] Add persistence check", {
           productId: product._id,
-          saved: Boolean(savedItem),
+          saved: sameProductItems.length > 0,
           savedCartId:
             savedCart.cartId ?? savedCart._id ?? savedObject?._id ?? null,
-          savedItemId: savedItem?._id,
-          savedQuantity: savedItem?.quantity,
+          savedItemId: persistedCartItem?._id,
+          savedQuantity: persistedCartItem?.quantity,
         });
-        if (!savedItem) {
+        if (sameProductItems.length === 0) {
           throw new Error(
             "Cart add returned success, but the item was not saved.",
           );
@@ -322,25 +495,47 @@ return product
         throw error;
       }
     }
-        setItems((current) => {
+    const productId = "_id" in product ? product._id : getName(product);
+    const variantId = selectedVariantId(product);
+    const colorVariantId = selectedColorVariantId(product);
+    const size = "size" in product ? product.size : undefined;
+    const weight = "weight" in product ? product.weight : undefined;
+    const lineId = cartLineId(
+      productId,
+      variantId,
+      colorVariantId,
+      size,
+      weight,
+    );
+    setItems((current) => {
       const existing = current.find(
         (item) =>
-          item.id === ("_id" in product ? product._id : getName(product)),
+          item.lineId === lineId ||
+          Boolean(
+            persistedCartItem?._id && item.cartItemId === persistedCartItem._id,
+          ),
       );
-      if (existing)
+      if (existing) {
         return current.map((item) =>
-          item.id === existing.id
-            ? { ...item, quantity: item.quantity + quantity }
+          item === existing
+            ? {
+                ...item,
+                cartItemId: persistedCartItem?._id ?? item.cartItemId,
+                quantity: item.quantity + quantity,
+              }
             : item,
         );
+      }
       return [
         ...current,
         {
-          id: "_id" in product ? product._id : getName(product),
-          cartItemId: undefined,
+          id: productId,
+          lineId,
+          cartItemId: persistedCartItem?._id,
           storeId: "storeId" in product ? product.storeId : undefined,
           product,
           quantity,
+          variantLabel: productVariantLabel(product),
         },
       ];
     });
@@ -363,14 +558,18 @@ return product
           error,
         });
         if ((error as { status?: number })?.status === 404) {
-          setItems((current) => current.filter((entry) => entry.id !== item.id));
+          setItems((current) =>
+            current.filter(
+              (entry) => getCartItemLineId(entry) !== getCartItemLineId(item),
+            ),
+          );
           return;
         }
         // Backend unavailable for other reasons; continue with local state
       }
     } else if (token && amount > 0 && "_id" in item.product) {
       try {
-                const firstVariant =
+        const firstVariant =
           "variants" in item.product && Array.isArray(item.product.variants)
             ? item.product.variants[0]
             : undefined;
@@ -399,13 +598,14 @@ return product
     }
     setItems((current) =>
       current.flatMap((entry) => {
-        if (entry.id !== item.id) return [entry];
+        if (getCartItemLineId(entry) !== getCartItemLineId(item))
+          return [entry];
         const quantity = entry.quantity + amount;
         return quantity > 0 ? [{ ...entry, quantity }] : [];
       }),
     );
   };
-   const clearCart = async () => {
+  const clearCart = async () => {
     if (token) {
       try {
         await api.clearCart(token);
@@ -426,12 +626,24 @@ return product
         // Backend unavailable; continue with local state
       }
     }
-    setItems((current) => current.filter((entry) => entry.id !== item.id));
+    setItems((current) =>
+      current.filter(
+        (entry) => getCartItemLineId(entry) !== getCartItemLineId(item),
+      ),
+    );
   };
 
   return (
     <CartContext.Provider
-      value={{ items, cartId, loading, clearCart, addItem, changeQuantity, removeItem }}
+      value={{
+        items,
+        cartId,
+        loading,
+        clearCart,
+        addItem,
+        changeQuantity,
+        removeItem,
+      }}
     >
       {children}
     </CartContext.Provider>

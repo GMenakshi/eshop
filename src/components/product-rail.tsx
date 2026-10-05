@@ -23,10 +23,12 @@ export function ProductRail({
   title,
   products,
   showArrow = true,
+  onSeeAll,
 }: {
   title: string;
   products: ApiProduct[];
   showArrow?: boolean;
+  onSeeAll?: () => void;
 }) {
   return (
     <View style={styles.section}>
@@ -34,12 +36,11 @@ export function ProductRail({
         <View style={styles.header}>
           <ThemedText style={styles.heading}>{title}</ThemedText>
           {showArrow && (
-            <Pressable style={styles.arrowBtn}>
-              <SymbolView
-                name={{ ios: "arrow.right", android: "arrow_forward", web: "arrow_forward" }}
-                size={16}
-                tintColor="#FFFFFF"
-              />
+            <Pressable
+              onPress={() => (onSeeAll ? onSeeAll() : router.push("/products"))}
+              hitSlop={8}
+            >
+              <ThemedText style={styles.seeAllText}>See all</ThemedText>
             </Pressable>
           )}
         </View>
@@ -123,13 +124,10 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: ink,
   },
-  arrowBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: ink,
-    alignItems: "center",
-    justifyContent: "center",
+  seeAllText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#E8875C",
   },
   row: {
     flexDirection: "row",
@@ -209,4 +207,5 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: ink,
   },
+  
 });

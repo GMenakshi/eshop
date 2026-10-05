@@ -87,7 +87,7 @@ export default function SignInScreen() {
                 <TextInput
                   autoCapitalize="none"
                   keyboardType="email-address"
-                  placeholder="Loisbecket@gmail.com"
+                  placeholder="abc1234@gmail.com"
                   placeholderTextColor={muted}
                   style={styles.input}
                   value={email}
@@ -135,7 +135,15 @@ export default function SignInScreen() {
                       Remember me
                     </ThemedText>
                   </Pressable>
-                  <Pressable>
+                  <Pressable
+                    hitSlop={8}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/forgot-password" as any,
+                        params: { email: email.trim() },
+                      })
+                    }
+                  >
                     <ThemedText style={styles.forgotText}>
                       Forgot Password ?
                     </ThemedText>

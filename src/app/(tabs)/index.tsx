@@ -4,6 +4,10 @@ import { useAuth } from "@/context/auth-context";
 import { useCart } from "@/context/cart-context";
 import { useWishlist } from "@/context/wishlist-context";
 import { api, API_BASE_URL, apiImageUrl } from "@/lib/api";
+import {
+  fetchNotifications,
+  filterNotificationsForStore,
+} from "@/lib/notifications-api";
 import { useStore } from "@/lib/store-context";
 import { useVoiceSearch } from "@/lib/use-voice-search";
 import { Ionicons } from "@expo/vector-icons";
@@ -12,7 +16,6 @@ import { BlurView } from "expo-blur";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { router, useFocusEffect } from "expo-router";
-import { fetchNotifications } from "@/lib/notifications-api";
 import { SymbolView } from "expo-symbols";
 import { useVideoPlayer } from "expo-video";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -56,6 +59,7 @@ export type HomeProduct = {
   deliveryTime?: string;
   productCode?: string;
   badge?: string;
+  createdAt?: string;
   colors?: HomeProductColor[];
   variants?: any[];
 };
@@ -164,7 +168,7 @@ const categoryDisplayData = [
 const genderTabs = ["Man", "Women", "Kid"];
 
 // Banner colours: used when the API banner has no `color` field
-const bannerPresets = ["#E8875C", "#245C55", "#7A4FD6", "#C2456B", "#2F6FDE"];
+const bannerPresets = ["#E8875C", "#C2456B", "#7A4FD6", "#C2456B", "#2F6FDE"];
 const FOR_YOU = "for-you";
 const isHex = (v: unknown): v is string =>
   typeof v === "string" && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v.trim());
@@ -223,6 +227,14 @@ const mapBanner = (b: any, idx: number) => {
       ? String(typeof rawProd === "object" ? rawProd._id : rawProd)
       : null,
   };
+};
+
+const productDiscount = (p: HomeProduct) => {
+  const v = p.variants?.[0];
+  const sv = v?.sizeVariants?.[0];
+  const mrp = Number(sv?.mrp ?? v?.mrp);
+  const offer = Number(sv?.offerPrice ?? v?.offerPrice ?? p.price);
+  return mrp > offer && offer > 0 ? Math.round(((mrp - offer) / mrp) * 100) : 0;
 };
 
 const formatAddress = (a: any): string => {
@@ -299,11 +311,16 @@ export default function HomeScreen() {
     }[]
   >([]);
   const [activeBannerIndex, setActiveBannerIndex] = useState(0);
+  const [offerBanners, setOfferBanners] = useState<
+    { id: string; image: string; productId: string | null }[]
+  >([]);
   const [categoryBanners, setCategoryBanners] = useState<
     ReturnType<typeof mapBanner>[]
   >([]);
   const bgAnim = useRef(new Animated.Value(0)).current;
   const prevBannerIndexRef = useRef(0);
+  const bannerScrollX = useRef(new Animated.Value(0)).current;
+  const bannerScrollRef = useRef<ScrollView>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
@@ -412,22 +429,31 @@ export default function HomeScreen() {
     };
   }, []);
 
-    useFocusEffect(
+  useFocusEffect(
     useCallback(() => {
       if (!token) {
         setUnreadCount(0);
         return;
       }
       let active = true;
-      fetchNotifications(token, 1)
+      fetchNotifications(token, 1, activeStore?.mongoId ?? storeId ?? undefined)
         .then((d) => {
-          if (active) setUnreadCount(d.unreadCount ?? 0);
+          const notifications = filterNotificationsForStore(
+            d.notifications,
+            [activeStore?.mongoId, activeStore?.id, storeId].filter(
+              (id): id is string => Boolean(id),
+            ),
+          );
+          if (active)
+            setUnreadCount(
+              d.unreadCount ?? notifications.filter((n) => !n.isRead).length,
+            );
         })
         .catch(() => undefined);
       return () => {
         active = false;
       };
-    }, [token]),
+    }, [token, activeStore?.id, activeStore?.mongoId, storeId]),
   );
 
   const loadHomeData = async () => {
@@ -490,6 +516,7 @@ export default function HomeScreen() {
               description: product.description ?? "",
               deliveryTime: product.deliveryTime,
               productCode: product.productCode,
+              createdAt: product.createdAt,
               colors,
               variants: product.variants ?? [],
             };
@@ -522,7 +549,7 @@ export default function HomeScreen() {
               bannerStoreId === activeStore.mongoId
             );
           });
-        setBanners(filtered.map(mapBanner));
+        setBanners(filtered.filter((b: any) => !b.offerBanner).map(mapBanner));
       }
 
       if (productResult.status === "rejected") {
@@ -554,8 +581,10 @@ export default function HomeScreen() {
   }, [storeId]);
 
   useEffect(() => {
-    setCategoryBanners([]);
-    if (activeCategory === FOR_YOU) return;
+    if (activeCategory === FOR_YOU) {
+      setCategoryBanners([]);
+      return;
+    }
 
     let active = true;
     (async () => {
@@ -583,6 +612,74 @@ export default function HomeScreen() {
     };
   }, [activeCategory, activeStore?.mongoId]);
 
+  useEffect(() => {
+    const mongoId = activeStore?.mongoId;
+    if (!mongoId) {
+      setOfferBanners([]);
+      return;
+    }
+    let active = true;
+    (async () => {
+      try {
+        const url = `${API_BASE_URL}/banner/public/offer-banners?storeId=${encodeURIComponent(mongoId)}`;
+        const res = await fetch(url);
+        const json = await res.json();
+        console.log("[OfferBanner]", url, JSON.stringify(json));
+        if (!active || !Array.isArray(json?.banners)) return;
+        setOfferBanners(
+          json.banners
+            .filter((b: any) => b.isActive !== false)
+            .filter((b: any) => {
+              const raw = b.storeId;
+              const id = typeof raw === "object" ? raw?._id : raw;
+              return !id || id === mongoId;
+            })
+            .map((b: any) => ({
+              id: String(b._id),
+              image: apiImageUrl(b.image) ?? b.image,
+              productId: b.productId
+                ? String(
+                    typeof b.productId === "object"
+                      ? b.productId._id
+                      : b.productId,
+                  )
+                : null,
+            })),
+        );
+      } catch (error) {
+        console.warn("Failed to load offer banners", error);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [activeStore?.mongoId]);
+
+  const categoryItems = useMemo(
+    () => [
+      {
+        id: FOR_YOU,
+        name: "For You",
+        emoji: undefined as string | undefined,
+        icon: "storefront" as const,
+        image: undefined as string | undefined,
+      },
+      ...categories.map((cat, idx) => ({
+        id: cat.id,
+        name: cat.name,
+        emoji: categoryDisplayData[idx % categoryDisplayData.length].emoji as
+          | string
+          | undefined,
+        icon: undefined as "storefront" | undefined,
+        image:
+          typeof cat.image === "string" && cat.image.trim()
+            ? apiImageUrl(cat.image)
+            : undefined,
+      })),
+    ],
+    [categories],
+  );
+
   const isForYou = activeCategory === FOR_YOU;
   const activeCategoryObj = categories.find((cat) => cat.id === activeCategory);
   const activeCategoryName = activeCategoryObj?.name ?? "";
@@ -593,10 +690,37 @@ export default function HomeScreen() {
       matchesCategory && name.toLowerCase().includes(query.trim().toLowerCase())
     );
   });
-  const visibleBanners = isForYou
-    ? banners.filter((b) => !b.categoryId)
-    : categoryBanners;
+  const forYouBanners = banners.filter((b) => !b.categoryId);
+  const visibleBanners =
+    isForYou || categoryBanners.length === 0 ? forYouBanners : categoryBanners;
   const inspirationProducts = products.slice(0, 2); // Show only 2 products for SHOP NOW
+  const offerImage = offerBanners[0]?.image;
+  const flashProducts = useMemo(() => {
+    const addedTime = (p: HomeProduct) => {
+      const t = p.createdAt ? Date.parse(p.createdAt) : NaN;
+      if (!Number.isNaN(t)) return t;
+      // MongoDB ObjectId: first 8 hex chars = creation time in seconds
+      const fromId = parseInt(String(p.id).slice(0, 8), 16);
+      return Number.isNaN(fromId) ? 0 : fromId * 1000;
+    };
+    return [...products]
+      .sort((a, b) => addedTime(b) - addedTime(a))
+      .slice(0, 8);
+  }, [products]);
+
+  // Auto-slide the hero banners
+  useEffect(() => {
+    if (visibleBanners.length < 2) return;
+    const cardWidth = Dimensions.get("window").width - 48 + 12;
+    const timer = setInterval(() => {
+      const next = (prevBannerIndexRef.current + 1) % visibleBanners.length;
+      bannerScrollRef.current?.scrollTo({
+        x: next * cardWidth,
+        animated: true,
+      });
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [visibleBanners.length, activeCategory]);
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const y = event.nativeEvent.contentOffset.y ?? 0;
@@ -699,7 +823,9 @@ export default function HomeScreen() {
   const handleBannerScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const cardWidth = Dimensions.get("window").width - 48 + 12; // card + gap
-      const idx = Math.round(event.nativeEvent.contentOffset.x / cardWidth);
+      const x = event.nativeEvent.contentOffset.x;
+      bannerScrollX.setValue(x / cardWidth);
+      const idx = Math.round(x / cardWidth);
       const clamped = Math.max(0, Math.min(idx, visibleBanners.length - 1));
       if (clamped !== prevBannerIndexRef.current) {
         prevBannerIndexRef.current = clamped;
@@ -710,6 +836,7 @@ export default function HomeScreen() {
   );
 
   const selectCategory = (id: string) => {
+    bannerScrollX.setValue(0);
     setActiveCategory(id);
     setActiveBannerIndex(0);
     prevBannerIndexRef.current = 0;
@@ -776,10 +903,7 @@ export default function HomeScreen() {
   });
 
   const catBarTop = insets.top + 12 + 54 + 6;
-  const revealEnd = Math.max(
-    catLayout.y + catLayout.h - (insets.top + 78),
-    31,
-  );
+  const revealEnd = Math.max(catLayout.y + catLayout.h - (insets.top + 78), 31);
   const catBarOpacity = scrollY.interpolate({
     inputRange: [revealEnd - 30, revealEnd],
     outputRange: [0, 1],
@@ -892,28 +1016,45 @@ export default function HomeScreen() {
                 </ThemedText>
               )}
             </View>
-            <Pressable
-              style={s.headerIconBtn}
-              onPress={() => router.push("/notifications")}
-              accessibilityLabel="Open notifications"
-            >
-              <SymbolView
-                name={{
-                  ios: "bell",
-                  android: "notifications",
-                  web: "notifications",
-                }}
-                size={22}
-                tintColor="#1A1A1A"
-              />
-              {unreadCount > 0 && (
-                <View style={s.notifBadge}>
-                  <ThemedText style={s.notifBadgeText}>
-                    {unreadCount > 9 ? "9+" : unreadCount}
-                  </ThemedText>
-                </View>
-              )}
-            </Pressable>
+            <View style={s.headerActions}>
+              <Pressable
+                style={s.headerIconBtn}
+                onPress={() => router.push("/cart")}
+                accessibilityLabel="Open cart"
+              >
+                <SymbolView
+                  name={{
+                    ios: "cart.fill",
+                    android: "shopping_cart",
+                    web: "shopping_cart",
+                  }}
+                  size={22}
+                  tintColor="#1A1A1A"
+                />
+              </Pressable>
+              <Pressable
+                style={s.headerIconBtn}
+                onPress={() => router.push("/notifications")}
+                accessibilityLabel="Open notifications"
+              >
+                <SymbolView
+                  name={{
+                    ios: "bell",
+                    android: "notifications",
+                    web: "notifications",
+                  }}
+                  size={22}
+                  tintColor="#1A1A1A"
+                />
+                {unreadCount > 0 && (
+                  <View style={s.notifBadge}>
+                    <ThemedText style={s.notifBadgeText}>
+                      {unreadCount > 9 ? "9+" : unreadCount}
+                    </ThemedText>
+                  </View>
+                )}
+              </Pressable>
+            </View>
           </View>
           {/* ─── Search Bar (in page) ─── */}
           {/* space where the floating search bar sits at rest */}
@@ -922,6 +1063,7 @@ export default function HomeScreen() {
           {/* ─── Hero Banner ─── */}
           {visibleBanners.length > 0 ? (
             <ScrollView
+              ref={bannerScrollRef}
               key={activeCategory}
               horizontal
               pagingEnabled
@@ -954,19 +1096,49 @@ export default function HomeScreen() {
                 </Pressable>
               ))}
             </ScrollView>
-          ) : !isForYou ? null : (
+          ) : (
             <View style={s.heroBannerWrap}>
               <View style={s.heroCard}>
-                <Image
-                  source={
-                    heroProduct
-                      ? { uri: heroProduct.image }
-                      : require("@/assets/images/video1.gif")
-                  }
-                  style={StyleSheet.absoluteFill}
-                  contentFit="cover"
-                />
+                {heroProduct ? (
+                  <Image
+                    source={{ uri: heroProduct.image }}
+                    style={StyleSheet.absoluteFill}
+                    contentFit="cover"
+                  />
+                ) : (
+                  <View
+                    style={[
+                      StyleSheet.absoluteFill,
+                      { backgroundColor: "#E5E5E5" },
+                    ]}
+                  />
+                )}
               </View>
+            </View>
+          )}
+
+          {/* ─── Banner Dots ─── */}
+          {visibleBanners.length > 1 && (
+            <View style={s.bannerDots}>
+              {visibleBanners.map((banner, i) => {
+                const range = [i - 1, i, i + 1];
+                const width = bannerScrollX.interpolate({
+                  inputRange: range,
+                  outputRange: [6, 18, 6],
+                  extrapolate: "clamp",
+                });
+                const backgroundColor = bannerScrollX.interpolate({
+                  inputRange: range,
+                  outputRange: ["#D0D0D0", "#E8875C", "#D0D0D0"],
+                  extrapolate: "clamp",
+                });
+                return (
+                  <Animated.View
+                    key={banner.id}
+                    style={[s.bannerDot, { width, backgroundColor }]}
+                  />
+                );
+              })}
             </View>
           )}
 
@@ -980,52 +1152,14 @@ export default function HomeScreen() {
               })
             }
           >
-            <View style={s.categoriesHeader}>
-              <ThemedText style={s.sectionTitle}>Categories</ThemedText>
-              {/* <View style={s.genderTabs}>
-                {genderTabs.map((tab) => (
-                  <Pressable
-                    key={tab}
-                    style={[
-                      s.genderTab,
-                      activeGenderTab === tab && s.genderTabActive,
-                    ]}
-                    onPress={() => setActiveGenderTab(tab)}
-                  >
-                    <ThemedText
-                      style={[
-                        s.genderTabText,
-                        activeGenderTab === tab && s.genderTabTextActive,
-                      ]}
-                    >
-                      {tab}
-                    </ThemedText>
-                  </Pressable>
-                ))}
-              </View> */}
-            </View>
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={s.categoriesRow}
             >
-              {[
-                {
-                  id: FOR_YOU,
-                  name: "For You",
-                  emoji: "✨",
-                  image: undefined as string | undefined,
-                },
-                ...categories.map((cat, idx) => ({
-                  id: cat.id,
-                  name: cat.name,
-                  emoji:
-                    categoryDisplayData[idx % categoryDisplayData.length].emoji,
-                  image: cat.image ? apiImageUrl(cat.image) : undefined,
-                })),
-              ].map((cat) => (
+              {categoryItems.map((cat) => (
                 <Pressable
-                  key={cat.id}
+                  key={`${cat.id}-${cat.name}`}
                   style={s.categoryItem}
                   onPress={() => selectCategory(cat.id)}
                 >
@@ -1037,9 +1171,29 @@ export default function HomeScreen() {
                   >
                     {cat.image ? (
                       <Image
+                        key={`${cat.id}-image`}
                         source={{ uri: cat.image }}
                         style={s.categoryCircleImage}
                         contentFit="cover"
+                        cachePolicy="memory-disk"
+                        recyclingKey={cat.id}
+                        transition={0}
+                        onError={(e) =>
+                          console.warn(
+                            "Category image failed",
+                            cat.id,
+                            cat.image,
+                            e,
+                          )
+                        }
+                      />
+                    ) : cat.icon ? (
+                      <Ionicons
+                        name={cat.icon}
+                        size={26}
+                        color={
+                          activeCategory === cat.id ? "#E8875C" : "#444444"
+                        }
                       />
                     ) : (
                       <ThemedText style={s.categoryEmoji}>
@@ -1052,6 +1206,40 @@ export default function HomeScreen() {
               ))}
             </ScrollView>
           </View>
+
+          {/* ─── New Arrivals ─── */}
+          {isForYou && flashProducts.length > 0 && (
+            <View style={s.flashWrap}>
+              <View style={s.flashBanner}>
+                <ThemedText style={s.flashTitle}>NEW ARRIVALS</ThemedText>
+              </View>
+              <ThemedText style={s.flashSub}>JUST LANDED</ThemedText>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={s.flashRow}
+              >
+                {flashProducts.map((product) => (
+                  <Pressable
+                    key={product.id}
+                    style={s.flashCard}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/product/[id]",
+                        params: { id: product.id },
+                      })
+                    }
+                  >
+                    <Image
+                      source={{ uri: product.image }}
+                      style={s.flashImage}
+                      contentFit="cover"
+                    />
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          )}
 
           {/* ─── For You ─── */}
           {isForYou && products.length > 0 && (
@@ -1156,7 +1344,7 @@ export default function HomeScreen() {
                   )}
                 </View>
                 <Image
-                  source={{ uri: visibleBanners[1].image }}
+                  source={{ uri: offerImage || visibleBanners[1].image }}
                   style={s.secondaryBannerImage}
                   contentFit="cover"
                 />
@@ -1166,7 +1354,7 @@ export default function HomeScreen() {
             <View style={s.secondaryBannerWrap}>
               <View style={s.secondaryBannerCard}>
                 <LinearGradient
-                  colors={["#245C55", "#3B7A6E", "#5A9C8C"]}
+                  colors={["#d7c3a5", "#d7c3a5", "#d7c3a5"]}
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 1 }}
                   style={StyleSheet.absoluteFill}
@@ -1184,6 +1372,13 @@ export default function HomeScreen() {
                     <ThemedText style={s.heroTryBtnText}>SHOP NOW</ThemedText>
                   </Pressable>
                 </View>
+                {!!offerImage && (
+                  <Image
+                    source={{ uri: offerImage }}
+                    style={s.secondaryBannerImage}
+                    contentFit="cover"
+                  />
+                )}
               </View>
             </View>
           )}
@@ -1385,7 +1580,7 @@ export default function HomeScreen() {
         {renderSearchPill()}
       </Animated.View>
 
-            {categories.length > 0 && (
+      {categories.length > 0 && (
         <Animated.View
           pointerEvents={chipsActive ? "auto" : "none"}
           style={[s.catBar, { top: catBarTop, opacity: catBarOpacity }]}
@@ -1632,6 +1827,13 @@ export default function HomeScreen() {
 const s = StyleSheet.create({
   /* ─── Layout ─── */
   screen: { flex: 1, backgroundColor: "#FAFAFA" },
+  offerBannerWrap: { marginHorizontal: 24, marginBottom: 28 },
+  offerBannerImage: {
+    width: "100%",
+    height: 140,
+    borderRadius: 20,
+    backgroundColor: "#EEE",
+  },
   safeArea: { flex: 1 },
   scrollContent: { paddingBottom: 40 },
   topGradientWrap: {
@@ -1655,33 +1857,38 @@ const s = StyleSheet.create({
   greeting: {
     fontSize: 14,
     fontStyle: "italic",
-    color: "#9E7B6B",
+    color: "#FFFFFF",
     fontWeight: "500",
     marginBottom: 4,
   },
   headline: {
     fontSize: 24,
     fontWeight: "800",
-    color: "#1A1A1A",
+    color: "#FFFFFF",
     letterSpacing: -0.5,
   },
   storeAddress: {
     fontSize: 12,
     fontWeight: "500",
-    color: "#7A6A60",
+    color: "#FFFFFF",
     marginTop: 2,
   },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   headerIconBtn: {
-  width: 44,
-  height: 44,
-  borderRadius: 14,
-  backgroundColor: "rgba(255,255,255,0.7)",
-  alignItems: "center",
-  justifyContent: "center",
-  borderWidth: 1,
-  borderColor: "rgba(0,0,0,0.06)",
-  position: "relative",
-},
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: "rgba(255,255,255,0.7)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.06)",
+    position: "relative",
+  },
 
   /* ─── Search Bar ─── */
   searchBar: {
@@ -1786,9 +1993,29 @@ const s = StyleSheet.create({
     bottom: 0,
   },
 
+  /* ─── Banner Dots ─── */
+  bannerDots: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 6,
+    marginTop: -20,
+    marginBottom: 12,
+  },
+  bannerDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#D0D0D0",
+  },
+  bannerDotActive: {
+    width: 18,
+    backgroundColor: "#E8875C",
+  },
+
   /* ─── Categories ─── */
   categoriesSection: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 0,
     marginBottom: 28,
   },
   categoriesHeader: {
@@ -1796,6 +2023,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     marginBottom: 18,
+    paddingHorizontal: 24,
   },
   sectionTitle: {
     fontSize: 20,
@@ -1828,8 +2056,8 @@ const s = StyleSheet.create({
     color: "#FFFFFF",
   },
   categoriesRow: {
-    gap: 16,
-    paddingRight: 24,
+    gap: 8,
+    paddingRight: 0,
   },
   categoryItem: {
     alignItems: "center",
@@ -1844,14 +2072,16 @@ const s = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 8,
     overflow: "hidden",
+    borderWidth: 2,
+    borderColor: "transparent",
   },
   categoryCircleActive: {
-    borderWidth: 2,
     borderColor: "#E8875C",
   },
   categoryCircleImage: {
-    width: "100%",
-    height: "100%",
+    width: 56,
+    height: 56,
+    borderRadius: 28,
   },
   categoryEmoji: {
     fontSize: 26,
@@ -2150,6 +2380,45 @@ const s = StyleSheet.create({
     fontWeight: "700",
     color: "#1A1A1A",
   },
+  flashWrap: {
+    marginHorizontal: 24,
+    marginBottom: 28,
+    backgroundColor: "#eccd9e",
+    borderRadius: 20,
+    overflow: "hidden",
+    paddingBottom: 16,
+  },
+  flashBanner: {
+    backgroundColor: "#d4561b",
+    marginTop: 10,
+    paddingVertical: 10,
+    alignItems: "center",
+  },
+  flashTitle: {
+    color: "#ffffff",
+    fontSize: 30,
+    fontWeight: "900",
+    letterSpacing: 1,
+  },
+  flashSub: {
+    color: "#410b0b",
+    fontSize: 18,
+    fontWeight: "900",
+    textAlign: "center",
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  flashRow: {
+    gap: 10,
+    paddingHorizontal: 12,
+  },
+  flashCard: {
+    width: 170,
+    aspectRatio: 0.8,
+    borderRadius: 14,
+    overflow: "hidden",
+  },
+  flashImage: { width: "100%", height: "100%" },
   forYouSection: {
     paddingHorizontal: 24,
     marginBottom: 28,
@@ -2217,28 +2486,28 @@ const s = StyleSheet.create({
     right: 0,
     bottom: 0,
   },
-    notifBadge: {
-  position: "absolute",
-  top: 6,
-  right: 6,
-  minWidth: 17,
-  height: 17,
-  borderRadius: 8.5,
-  backgroundColor: "#E85D4A",
-  alignItems: "center",
-  justifyContent: "center",
-  paddingHorizontal: 3,
-  borderWidth: 2,
-  borderColor: "#FFFFFF",
-},
+  notifBadge: {
+    position: "absolute",
+    top: 6,
+    right: 6,
+    minWidth: 17,
+    height: 17,
+    borderRadius: 8.5,
+    backgroundColor: "#E85D4A",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 3,
+    borderWidth: 2,
+    borderColor: "#FFFFFF",
+  },
 
-notifBadgeText: {
-  color: "#FFFFFF",
-  fontSize: 8,
-  lineHeight: 10,
-  fontWeight: "800",
-  textAlign: "center",
-},
+  notifBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 8,
+    lineHeight: 10,
+    fontWeight: "800",
+    textAlign: "center",
+  },
   catBarRow: { paddingHorizontal: 24, gap: 22, alignItems: "center" },
   catBarItem: { height: 40, justifyContent: "center" },
   catBarText: { fontSize: 13, fontWeight: "600", color: "#8A8A8A" },
@@ -2253,9 +2522,9 @@ notifBadgeText: {
     borderRadius: 1,
   },
   catBar: {
-  width: "100%",
-  paddingHorizontal: 16,
-  paddingVertical: 10,
-  backgroundColor: "transparent",
-},
+    width: "100%",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: "transparent",
+  },
 });

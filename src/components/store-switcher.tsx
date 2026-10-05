@@ -6,16 +6,21 @@ import { useStore } from "@/lib/store-context";
 
 export function StoreSwitcher() {
   const { stores, storeId, switchStore } = useStore();
-  if (stores.length < 2) return null;
+  console.log("[StoreSwitcher] stores:", JSON.stringify(stores));
+  if (stores.length === 0) return null;
+  const single = stores.length === 1;
 
   return (
     <View style={styles.wrap}>
-      <ThemedText style={styles.heading}>MY STORES</ThemedText>
+      <ThemedText style={styles.heading}>
+        {single ? "MY STORE" : "MY STORES"}
+      </ThemedText>
       {stores.map((s) => {
         const active = s.id === storeId;
         return (
           <Pressable
             key={s.id}
+            disabled={single || active}
             style={[styles.row, active && styles.rowActive]}
             onPress={async () => {
               if (active) return;
@@ -35,7 +40,15 @@ export function StoreSwitcher() {
 }
 
 const styles = StyleSheet.create({
-  wrap: { gap: 8, marginVertical: 16 },
+  wrap: {
+    gap: 8,
+    marginVertical: 16,
+    padding: 12,
+    borderRadius: 18,
+    backgroundColor: "#EEF4FF",
+    borderWidth: 1,
+    borderColor: "#DCE8FB",
+  },
   heading: { color: "#999", fontSize: 12, fontWeight: "800", letterSpacing: 1 },
   row: {
     flexDirection: "row",

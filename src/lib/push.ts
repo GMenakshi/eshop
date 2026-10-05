@@ -1,3 +1,4 @@
+import { API_BASE_URL } from "@/lib/api";
 import { getApp } from "@react-native-firebase/app";
 import {
   AuthorizationStatus,
@@ -10,7 +11,6 @@ import {
   requestPermission,
 } from "@react-native-firebase/messaging";
 import { Alert, PermissionsAndroid, Platform } from "react-native";
-import { API_BASE_URL } from "@/lib/api";
 
 const messaging = () => getMessaging(getApp());
 const TOKEN_URL = `${API_BASE_URL}/notifications/fcm-token`;
@@ -66,26 +66,60 @@ export async function unregisterPush(authToken: string) {
   }
 }
 
-// App open: show an alert (Firebase shows nothing in the foreground)
-export function listenForeground(onReceive?: () => void) {
+const normalizeStoreId = (value: unknown): string | undefined => {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return undefined;
+  const store = value as { _id?: unknown; id?: unknown };
+  if (typeof store._id === "string") return store._id;
+  return typeof store.id === "string" ? store.id : undefined;
+};
+
+const belongsToActiveStore = (
+  messageStore: unknown,
+  activeStoreIds: string[],
+) => {
+  const messageStoreId = normalizeStoreId(messageStore);
+  return !messageStoreId || activeStoreIds.includes(messageStoreId);
+};
+
+// App open: show active-store alerts, except for the order-placed popup.
+export function listenForeground(
+  onReceive?: () => void,
+  activeStoreIds: string[] = [],
+) {
   return onMessage(messaging(), async (message) => {
+    console.log("FCM foreground", JSON.stringify(message));
+
+    if (!belongsToActiveStore(message.data?.storeId, activeStoreIds)) return;
+
     onReceive?.();
-    Alert.alert(
-      message.notification?.title ?? "Notification",
-      message.notification?.body ?? "",
-    );
+
+    const title = message.notification?.title ?? "";
+    if (/order placed/i.test(title)) return;
+
+    Alert.alert(title || "Notification", message.notification?.body ?? "");
   });
 }
 
 // Tap handling: background -> foreground, and cold start
-export function listenNotificationTap(onOrder: (orderId: string) => void) {
+export function listenNotificationTap(
+  onOrder: (orderId: string) => void,
+  activeStoreIds: string[] = [],
+) {
   const unsubscribe = onNotificationOpenedApp(messaging(), (message) => {
+    if (!belongsToActiveStore(message.data?.storeId, activeStoreIds)) return;
     const orderId = message.data?.orderId;
     if (typeof orderId === "string") onOrder(orderId);
   });
 
   getInitialNotification(messaging()).then((message) => {
-    const orderId = message?.data?.orderId;
+    if (
+      !message ||
+      !belongsToActiveStore(message.data?.storeId, activeStoreIds)
+    ) {
+      return;
+    }
+    const orderId = message.data?.orderId;
     if (typeof orderId === "string") onOrder(orderId);
   });
 

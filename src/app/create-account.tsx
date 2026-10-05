@@ -1,11 +1,15 @@
-import { FontAwesome, Ionicons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { router } from "expo-router";
+import DateTimePicker, {
+  DateTimePickerEvent,
+} from "@react-native-community/datetimepicker";
 import { useState } from "react";
 import {
     ActivityIndicator,
     Alert,
     KeyboardAvoidingView,
+    Platform,
     Pressable,
     ScrollView,
     StyleSheet,
@@ -16,6 +20,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { ThemedText } from "@/components/themed-text";
 import { api } from "@/lib/api";
+import { setPendingSignup } from "@/lib/pending-signup";
 import { goBackOrHome } from "@/lib/navigation";
 
 const ink = "#1C1B1F";
@@ -28,10 +33,25 @@ export default function CreateAccountScreen() {
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [dob, setDob] = useState("");
+  const [dobDate, setDobDate] = useState<Date>(new Date(2000, 0, 1));
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  const formatDate = (d: Date) => {
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    return `${dd}/${mm}/${d.getFullYear()}`;
+  };
+
+  const onDateChange = (event: DateTimePickerEvent, selected?: Date) => {
+    setShowDatePicker(false);
+    if (event.type === "dismissed" || !selected) return;
+    setDobDate(selected);
+    setDob(formatDate(selected));
+  };
 
   const handleCreateAccount = async () => {
     const cleanFirstName = firstName.trim();
@@ -65,6 +85,7 @@ export default function CreateAccountScreen() {
         password,
         confirmPassword: password,
       });
+      setPendingSignup(cleanEmail, password);
       router.push({ pathname: "/otp", params: { email: cleanEmail } });
     } catch (error) {
       Alert.alert(
@@ -126,34 +147,43 @@ export default function CreateAccountScreen() {
                 <TextInput
                   autoCapitalize="none"
                   keyboardType="email-address"
-                  placeholder="Loisbecket@gmail.com"
+                  placeholder="abc1234@gmail.com"
                   placeholderTextColor={muted}
                   style={styles.input}
                   value={email}
                   onChangeText={setEmail}
                 />
 
-                <View style={styles.dobWrap}>
+                <Pressable
+                  style={styles.dobWrap}
+                  onPress={() => setShowDatePicker(true)}
+                >
                   <TextInput
-                    placeholder="18/03/2024"
+                    placeholder="DOB - 18/03/2024"
                     placeholderTextColor={muted}
                     style={styles.dobInput}
                     value={dob}
-                    onChangeText={setDob}
+                    editable={false}
+                    pointerEvents="none"
                   />
                   <Ionicons name="calendar-outline" size={18} color={muted} />
-                </View>
+                </Pressable>
+
+                {showDatePicker && (
+                  <DateTimePicker
+                    value={dobDate}
+                    mode="date"
+                    display={Platform.OS === "ios" ? "inline" : "default"}
+                    maximumDate={new Date()}
+                    onChange={onDateChange}
+                  />
+                )}
 
                 <View style={styles.phoneWrap}>
-                  <View style={styles.phoneCode}>
-                    <ThemedText style={styles.flag}>🇺🇸</ThemedText>
-                    <Ionicons name="chevron-down" size={14} color={muted} />
-                  </View>
-                  <View style={styles.phoneDivider} />
                   <TextInput
                     autoCapitalize="none"
                     keyboardType="phone-pad"
-                    placeholder="(454) 726-0592"
+                    placeholder="Enter phone number"
                     placeholderTextColor={muted}
                     style={styles.phoneInput}
                     value={phone}
@@ -191,9 +221,7 @@ export default function CreateAccountScreen() {
                   {loading ? (
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
-                    <ThemedText style={styles.primaryText}>
-                      Register
-                    </ThemedText>
+                    <ThemedText style={styles.primaryText}>Register</ThemedText>
                   )}
                 </Pressable>
               </View>
@@ -242,6 +270,15 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
     alignItems: "center",
   },
+  iconBadge: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: "rgba(245, 185, 121, 1)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 18,
+  },
   title: {
     fontSize: 26,
     fontWeight: "800",
@@ -287,20 +324,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-  },
-  phoneCode: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
-  flag: {
-    fontSize: 18,
-  },
-  phoneDivider: {
-    width: 1,
-    height: 22,
-    backgroundColor: "#DEDEE3",
   },
   phoneInput: {
     flex: 1,
