@@ -1,25 +1,30 @@
-import OrderSuccessImage from "@/assets/images/OrderSuccess.svg";
+import { ProductRail } from "@/components/product-rail";
+import { api, type ApiProduct } from "@/lib/api";
+import { useStore } from "@/lib/store-context";
+import { Ionicons } from "@expo/vector-icons";
 import {
-    setAudioModeAsync,
-    useAudioPlayer,
-    useAudioPlayerStatus,
+  setAudioModeAsync,
+  useAudioPlayer,
+  useAudioPlayerStatus,
 } from "expo-audio";
 import { router, useLocalSearchParams } from "expo-router";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-    Animated,
-    BackHandler,
-    Easing,
-    Pressable,
-    StyleSheet,
-    Text,
-    View
+  Animated,
+  BackHandler,
+  Easing,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 const ink = "#1F1F1F";
 const muted = "#777777";
 const accent = "#E7718D";
+const successGreen = "#2E9E5B";
 
 export default function OrderSuccessScreen() {
   const { orderId, total, itemName } = useLocalSearchParams<{
@@ -27,6 +32,8 @@ export default function OrderSuccessScreen() {
     total?: string;
     itemName?: string;
   }>();
+  const { storeId } = useStore();
+  const [products, setProducts] = useState<ApiProduct[]>([]);
   const statusButtonOpacity = useRef(new Animated.Value(0)).current;
   const imageScale = useRef(new Animated.Value(0.3)).current;
   const imageOpacity = useRef(new Animated.Value(0)).current;
@@ -38,6 +45,20 @@ export default function OrderSuccessScreen() {
   const renderedOrderId = String(orderId ?? "0007023").padStart(7, "0");
   const renderedTotal = Number(total ?? 0).toFixed(2);
   const name = itemName?.trim() || "Your order";
+
+  useEffect(() => {
+    if (!storeId) return;
+    let active = true;
+    api
+      .products(storeId)
+      .then((res) => {
+        if (active) setProducts(res.products ?? []);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [storeId]);
 
   useEffect(() => {
     if (!playerStatus.isLoaded) return;
@@ -108,15 +129,22 @@ export default function OrderSuccessScreen() {
 
   return (
     <SafeAreaView style={styles.screen} edges={["top", "bottom"]}>
-      <View style={styles.content}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
         <Animated.View
           style={[
-            styles.successImage,
+            styles.successBadge,
             { opacity: imageOpacity, transform: [{ scale: imageScale }] },
           ]}
           accessibilityLabel="Order successfully placed"
         >
-          <OrderSuccessImage width="100%" height="100%" />
+          <View style={styles.badgeOuter}>
+            <View style={styles.badgeInner}>
+              <Ionicons name="checkmark" size={60} color="#FFFFFF" />
+            </View>
+          </View>
         </Animated.View>
 
         <Text style={styles.title}>Order placed!</Text>
@@ -143,17 +171,25 @@ export default function OrderSuccessScreen() {
           <Text style={styles.continueButtonText}>Continue Shopping</Text>
         </Pressable>
 
-        <Animated.View
-          style={[styles.buttonWrap, { opacity: statusButtonOpacity }]}
+        {products.length > 0 && (
+          <View style={styles.railWrap}>
+            <ProductRail
+              title="Keep exploring"
+              products={products.slice(0, 8)}
+              onSeeAll={() => router.push("/products")}
+            />
+          </View>
+        )}
+      </ScrollView>
+
+      <Animated.View style={[styles.footer, { opacity: statusButtonOpacity }]}>
+        <Pressable
+          style={styles.statusButton}
+          onPress={() => router.replace("/(tabs)/orders")}
         >
-          <Pressable
-            style={styles.statusButton}
-            onPress={() => router.replace("/(tabs)/orders")}
-          >
-            <Text style={styles.statusButtonText}>View Order Status</Text>
-          </Pressable>
-        </Animated.View>
-      </View>
+          <Text style={styles.statusButtonText}>View Order Status</Text>
+        </Pressable>
+      </Animated.View>
     </SafeAreaView>
   );
 }
@@ -164,17 +200,37 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
   },
   content: {
-    flex: 1,
     paddingHorizontal: 24,
     paddingTop: 24,
-    paddingBottom: 12,
+    paddingBottom: 24,
     alignItems: "center",
   },
-  successImage: {
-    width: 200,
-    height: 200,
+  successBadge: {
     marginTop: 24,
-    marginBottom: 20,
+    marginBottom: 24,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  badgeOuter: {
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    backgroundColor: "#E3F4EA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  badgeInner: {
+    width: 108,
+    height: 108,
+    borderRadius: 54,
+    backgroundColor: successGreen,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: successGreen,
+    shadowOpacity: 0.35,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
   },
   title: {
     color: ink,
@@ -241,9 +297,15 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "700",
   },
-  buttonWrap: {
+  railWrap: {
     width: "100%",
-    marginTop: "auto",
+    marginTop: 28,
+  },
+  footer: {
+    paddingHorizontal: 24,
+    paddingTop: 10,
+    paddingBottom: 12,
+    backgroundColor: "#FFFFFF",
   },
   statusButton: {
     minHeight: 54,

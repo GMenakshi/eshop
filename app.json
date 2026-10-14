@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Eshop",
+    "name": "Amp Store",
     "slug": "eshop",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -19,7 +19,7 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.meenaxi4499.eshop",
+      "package": "com.ampdevs.eshop",
       "googleServicesFile": "./google-services.json",
       "permissions": [
         "android.permission.INTERNET",
@@ -36,7 +36,10 @@
               "pathPrefix": "/store"
             }
           ],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         }
       ]
     },
@@ -58,9 +61,20 @@
       "expo-video",
       "expo-image",
       "expo-web-browser",
-      "@react-native-firebase/app",
-      "@react-native-firebase/messaging",
-      ["expo-build-properties", { "android": {} }],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow ESHOP to use the camera to scan store QR codes.",
+          "recordAudioAndroid": false
+        }
+      ],
+      "@react-native-firebase/app/app.plugin.js",
+      [
+        "expo-build-properties",
+        {
+          "android": {}
+        }
+      ],
       [
         "expo-speech-recognition",
         {
@@ -82,8 +96,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "482d138f-5e95-4567-bc0b-c8e79faa0a75"
+        "projectId": "ba1831e8-eef3-4f75-acb8-9732ee9d3c50"
       }
-    }
+    },
+    "owner": "ampdevs425"
   }
 }

@@ -1,15 +1,19 @@
 import { useCart } from "@/context/cart-context";
 import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
+import { deliveryDateText } from "@/lib/delivery-text";
 import { useStore } from "@/lib/store-context";
+import { usePincode } from "@/lib/use-pincode";
 import { useVoiceSearch } from "@/lib/use-voice-search";
 import { BlurView } from "expo-blur";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { router, useLocalSearchParams } from "expo-router";
 import { SymbolView } from "expo-symbols";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
+  KeyboardAvoidingView,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -30,6 +34,22 @@ const PAD_TOP = 8; // space above the pill, below the status bar
 const PAD_BOTTOM = 14; // how far the yellow reaches under the pill // how far the orange reaches below the search bar
 const HEADER_HEIGHT = SEARCH_H;
 
+const SORT_OPTIONS = [
+  { key: "relevance", label: "Relevance" },
+  { key: "priceAsc", label: "Price: Low to High" },
+  { key: "priceDesc", label: "Price: High to Low" },
+  { key: "rating", label: "Rating" },
+] as const;
+type SortKey = (typeof SORT_OPTIONS)[number]["key"];
+const RATING_OPTIONS = [
+  { value: 0, label: "Any" },
+  { value: 3, label: "3★ & above" },
+  { value: 4, label: "4★ & above" },
+  { value: 4.5, label: "4.5★ & above" },
+];
+const ratingOf = (p: any) => Number(p?.rating) || 0;
+const brandOf = (p: any) => (typeof p?.brandId === "string" ? p.brandId : "");
+
 export default function SearchResultsScreen() {
   const insets = useSafeAreaInsets();
   const headerTotal = insets.top + PAD_TOP + SEARCH_H + PAD_BOTTOM;
@@ -39,17 +59,90 @@ export default function SearchResultsScreen() {
     outputRange: [0, 1],
     extrapolate: "clamp",
   });
-  const { query } = useLocalSearchParams<{ query: string }>();
+  const { query, filter } = useLocalSearchParams<{
+    query: string;
+    filter?: string;
+  }>();
   const [searchQuery, setSearchQuery] = useState(query || "");
   const voice = useVoiceSearch((text, isFinal) => {
     setSearchQuery(text);
     if (isFinal) router.setParams({ query: text });
   });
   const { storeId } = useStore();
+  const pincode = usePincode();
   const { items: cartItems } = useCart();
 
   const [products, setProducts] = useState<ApiProduct[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [sort, setSort] = useState<SortKey>("relevance");
+  const [minPrice, setMinPrice] = useState("");
+  const [maxPrice, setMaxPrice] = useState("");
+  const [minRating, setMinRating] = useState(0);
+  const [onlyOffers, setOnlyOffers] = useState(false);
+  const [brands, setBrands] = useState<string[]>([]);
+
+  // opened from the home page's filter button
+  useEffect(() => {
+    if (filter === "1") setFilterOpen(true);
+  }, [filter]);
+
+  const resetFilters = () => {
+    setSort("relevance");
+    setMinPrice("");
+    setMaxPrice("");
+    setMinRating(0);
+    setOnlyOffers(false);
+    setBrands([]);
+  };
+
+  const brandOptions = useMemo(
+    () =>
+      Array.from(new Set(products.map(brandOf).filter(Boolean))) as string[],
+    [products],
+  );
+
+  const activeFilterCount =
+    (sort !== "relevance" ? 1 : 0) +
+    (minPrice || maxPrice ? 1 : 0) +
+    (minRating > 0 ? 1 : 0) +
+    (onlyOffers ? 1 : 0) +
+    (brands.length > 0 ? 1 : 0);
+
+  const visibleProducts = useMemo(() => {
+    const min = Number(minPrice) || 0;
+    const max = Number(maxPrice) || Infinity;
+    const list = products.filter((p) => {
+      const price = Number(p.price) || 0;
+      if (min > 0 || max !== Infinity) {
+        // price-on-request items can't be compared
+        if (!(price > 0) || price < min || price > max) return false;
+      }
+      if (minRating > 0 && ratingOf(p) < minRating) return false;
+      if (
+        onlyOffers &&
+        !(typeof p.originalPrice === "number" && p.originalPrice > price)
+      )
+        return false;
+      if (brands.length > 0 && !brands.includes(brandOf(p))) return false;
+      return true;
+    });
+    const sorted = [...list];
+    if (sort === "priceAsc")
+      sorted.sort(
+        (a, b) =>
+          (a.price > 0 ? a.price : Number.MAX_SAFE_INTEGER) -
+          (b.price > 0 ? b.price : Number.MAX_SAFE_INTEGER),
+      );
+    else if (sort === "priceDesc")
+      sorted.sort(
+        (a, b) => (b.price > 0 ? b.price : -1) - (a.price > 0 ? a.price : -1),
+      );
+    else if (sort === "rating")
+      sorted.sort((a, b) => ratingOf(b) - ratingOf(a));
+    return sorted;
+  }, [products, minPrice, maxPrice, minRating, onlyOffers, brands, sort]);
 
   const matchesSearchQuery = (product: ApiProduct, rawQuery: string) => {
     const query = (rawQuery ?? "").trim().toLowerCase();
@@ -151,7 +244,7 @@ export default function SearchResultsScreen() {
     if (!storeId) return;
     setLoading(true);
     api
-      .products(storeId)
+      .products(storeId, 1, pincode)
       .then((res) => {
         const filtered = (res.products ?? []).filter((p) =>
           matchesSearchQuery(p, query || ""),
@@ -159,9 +252,22 @@ export default function SearchResultsScreen() {
         setProducts(filtered.length > 0 ? filtered : (res.products ?? []));
       })
       .finally(() => setLoading(false));
-  }, [storeId, query]);
+  }, [storeId, query, pincode]);
 
   const cartCount = cartItems.reduce((acc, item) => acc + item.quantity, 0);
+
+  const chip = (label: string, active: boolean, onPress: () => void) => (
+    <Pressable
+      style={[styles.filterChip, active && styles.filterChipActive]}
+      onPress={onPress}
+    >
+      <Text
+        style={[styles.filterChipText, active && styles.filterChipTextActive]}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
 
   const renderFilterChips = () => (
     <ScrollView
@@ -169,32 +275,35 @@ export default function SearchResultsScreen() {
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={styles.filterChipsContainer}
     >
-      <Pressable style={styles.filterChip}>
+      <Pressable
+        style={[
+          styles.filterChip,
+          activeFilterCount > 0 && styles.filterChipActive,
+        ]}
+        onPress={() => setFilterOpen(true)}
+      >
         <SymbolView
           name={{ ios: "slider.horizontal.3", android: "tune", web: "tune" }}
           size={14}
           tintColor={ink}
         />
-        <Text style={styles.filterChipText}>Sort & Filter</Text>
+        <Text style={styles.filterChipText}>
+          Sort & Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+        </Text>
       </Pressable>
-      <Pressable style={styles.filterChip}>
-        <Text style={styles.filterChipText}>Price Live</Text>
-      </Pressable>
-      <Pressable style={styles.filterChip}>
-        <SymbolView
-          name={{
-            ios: "square.grid.2x2",
-            android: "grid_view",
-            web: "grid_view",
-          }}
-          size={14}
-          tintColor={ink}
-        />
-        <Text style={styles.filterChipText}>Value 365</Text>
-      </Pressable>
-      <Pressable style={styles.filterChip}>
-        <Text style={styles.filterChipText}>Brand</Text>
-      </Pressable>
+      {chip("Price: Low to High", sort === "priceAsc", () =>
+        setSort(sort === "priceAsc" ? "relevance" : "priceAsc"),
+      )}
+      {chip("4★ & above", minRating === 4, () =>
+        setMinRating(minRating === 4 ? 0 : 4),
+      )}
+      {chip("On offer", onlyOffers, () => setOnlyOffers((v) => !v))}
+      {brandOptions.length > 0 &&
+        chip(
+          brands.length > 0 ? `Brand (${brands.length})` : "Brand",
+          brands.length > 0,
+          () => setFilterOpen(true),
+        )}
     </ScrollView>
   );
 
@@ -220,7 +329,7 @@ export default function SearchResultsScreen() {
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.topOffersScroll}
       >
-        {products.slice(0, 4).map((p, i) => {
+        {visibleProducts.slice(0, 4).map((p, i) => {
           return (
             <Pressable
               key={`offer-${i}`}
@@ -250,15 +359,23 @@ export default function SearchResultsScreen() {
                 <Text style={styles.offerTitle} numberOfLines={1}>
                   {p.title}
                 </Text>
-                <View style={styles.offerPriceRow}>
-                  <Text style={styles.offerOriginalPrice}>
-                    ₹{(p.price * 1.5).toFixed(0)}
+                {p.price > 0 ? (
+                  <>
+                    <View style={styles.offerPriceRow}>
+                      <Text style={styles.offerOriginalPrice}>
+                        ₹{(p.price * 1.5).toFixed(0)}
+                      </Text>
+                      <Text style={styles.offerCurrentPrice}>₹{p.price}</Text>
+                    </View>
+                    <Text style={styles.offerPromo} numberOfLines={1}>
+                      Buy for ₹{(p.price * 0.9).toFixed(0)} & get 2%...
+                    </Text>
+                  </>
+                ) : (
+                  <Text style={styles.offerCurrentPrice}>
+                    Order to know Price
                   </Text>
-                  <Text style={styles.offerCurrentPrice}>₹{p.price}</Text>
-                </View>
-                <Text style={styles.offerPromo} numberOfLines={1}>
-                  Buy for ₹{(p.price * 0.9).toFixed(0)} & get 2%...
-                </Text>
+                )}
               </View>
             </Pressable>
           );
@@ -269,7 +386,7 @@ export default function SearchResultsScreen() {
 
   const renderProductGrid = () => (
     <View style={styles.gridContainer}>
-      {products.map((p, i) => {
+      {visibleProducts.map((p, i) => {
         const originalPrice = p.price * 2.5; // dummy logic
         const currentPrice = p.price;
         const discount = Math.round(
@@ -304,30 +421,39 @@ export default function SearchResultsScreen() {
             </View>
 
             <View style={styles.gridInfo}>
-              <Text style={styles.gridBrandLabel}>
+              {/* <Text style={styles.gridBrandLabel}>
                 ✓ Assured {p.brandId || "Birde"}
-              </Text>
+              </Text> */}
               <Text style={styles.gridTitle} numberOfLines={1}>
                 {p.title}
               </Text>
 
-              <View style={styles.gridPriceRow}>
-                <Text style={styles.gridDiscount}>↓{discount}%</Text>
-                <Text style={styles.gridOriginalPrice}>
-                  ₹{originalPrice.toFixed(0)}
-                </Text>
-                <Text style={styles.gridCurrentPrice}>
-                  ₹{currentPrice.toFixed(0)}
-                </Text>
-              </View>
-
-              <Text style={styles.gridWowPromo}>
-                WOW! Buy at ₹{(currentPrice * 0.9).toFixed(0)}
-              </Text>
+              {currentPrice > 0 ? (
+                <>
+                  <View style={styles.gridPriceRow}>
+                    <Text style={styles.gridDiscount}>↓{discount}%</Text>
+                    <Text style={styles.gridOriginalPrice}>
+                      ₹{originalPrice.toFixed(0)}
+                    </Text>
+                    <Text style={styles.gridCurrentPrice}>
+                      ₹{currentPrice.toFixed(0)}
+                    </Text>
+                  </View>
+                  {/* <Text style={styles.gridWowPromo}>
+                    WOW! Buy at ₹{(currentPrice * 0.9).toFixed(0)}
+                  </Text> */}
+                </>
+              ) : (
+                <View style={styles.gridPriceRow}>
+                  <Text style={styles.gridCurrentPrice}>
+                    Order to know Price
+                  </Text>
+                </View>
+              )}
               <Text style={styles.gridDelivery}>
                 Get it{" "}
                 <Text style={{ fontStyle: "italic", fontWeight: "bold" }}>
-                  Tomorrow
+                  {deliveryDateText(p.delivery, p.deliveryTime)}
                 </Text>
               </Text>
             </View>
@@ -352,17 +478,191 @@ export default function SearchResultsScreen() {
         )}
       >
         {renderFilterChips()}
-        {products.length > 0 && renderTopOffers()}
-        {products.length > 0 ? (
+        {visibleProducts.length > 0 && renderTopOffers()}
+        {visibleProducts.length > 0 ? (
           renderProductGrid()
         ) : (
-          <View style={{ padding: 40, alignItems: "center" }}>
+          <View style={{ padding: 40, alignItems: "center", gap: 12 }}>
             <Text style={{ color: muted, fontSize: 16 }}>
-              Loading results...
+              {loading
+                ? "Loading results..."
+                : "No products match your filters."}
             </Text>
+            {!loading && activeFilterCount > 0 && (
+              <Pressable onPress={resetFilters}>
+                <Text style={{ color: themeIconOrange, fontWeight: "700" }}>
+                  Clear filters
+                </Text>
+              </Pressable>
+            )}
           </View>
         )}
       </Animated.ScrollView>
+
+      {/* filter sheet */}
+      <Modal
+        visible={filterOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setFilterOpen(false)}
+      >
+        <View style={styles.sheetBackdrop}>
+          <Pressable style={{ flex: 1 }} onPress={() => setFilterOpen(false)} />
+          <KeyboardAvoidingView behavior="padding">
+            <View
+              style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}
+            >
+              <View style={styles.sheetHeader}>
+                <Text style={styles.sheetTitle}>Sort & Filter</Text>
+                <Pressable onPress={() => setFilterOpen(false)} hitSlop={10}>
+                  <Text style={styles.sheetClose}>✕</Text>
+                </Pressable>
+              </View>
+
+              <ScrollView
+                style={{ flexGrow: 0 }}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+              >
+                <Text style={styles.sheetLabel}>Sort by</Text>
+                <View style={styles.optionWrap}>
+                  {SORT_OPTIONS.map((o) => (
+                    <Pressable
+                      key={o.key}
+                      style={[
+                        styles.optionChip,
+                        sort === o.key && styles.optionChipActive,
+                      ]}
+                      onPress={() => setSort(o.key)}
+                    >
+                      <Text
+                        style={[
+                          styles.optionText,
+                          sort === o.key && styles.optionTextActive,
+                        ]}
+                      >
+                        {o.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Text style={styles.sheetLabel}>Price range (₹)</Text>
+                <View style={styles.priceRow}>
+                  <TextInput
+                    style={styles.priceInput}
+                    value={minPrice}
+                    onChangeText={(t) => setMinPrice(t.replace(/\D/g, ""))}
+                    placeholder="Min"
+                    placeholderTextColor="#999"
+                    keyboardType="number-pad"
+                  />
+                  <Text style={{ color: muted }}>to</Text>
+                  <TextInput
+                    style={styles.priceInput}
+                    value={maxPrice}
+                    onChangeText={(t) => setMaxPrice(t.replace(/\D/g, ""))}
+                    placeholder="Max"
+                    placeholderTextColor="#999"
+                    keyboardType="number-pad"
+                  />
+                </View>
+
+                <Text style={styles.sheetLabel}>Rating</Text>
+                <View style={styles.optionWrap}>
+                  {RATING_OPTIONS.map((o) => (
+                    <Pressable
+                      key={o.value}
+                      style={[
+                        styles.optionChip,
+                        minRating === o.value && styles.optionChipActive,
+                      ]}
+                      onPress={() => setMinRating(o.value)}
+                    >
+                      <Text
+                        style={[
+                          styles.optionText,
+                          minRating === o.value && styles.optionTextActive,
+                        ]}
+                      >
+                        {o.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Text style={styles.sheetLabel}>Offers</Text>
+                <View style={styles.optionWrap}>
+                  <Pressable
+                    style={[
+                      styles.optionChip,
+                      onlyOffers && styles.optionChipActive,
+                    ]}
+                    onPress={() => setOnlyOffers((v) => !v)}
+                  >
+                    <Text
+                      style={[
+                        styles.optionText,
+                        onlyOffers && styles.optionTextActive,
+                      ]}
+                    >
+                      Only products on offer
+                    </Text>
+                  </Pressable>
+                </View>
+
+                {brandOptions.length > 0 && (
+                  <>
+                    <Text style={styles.sheetLabel}>Brand</Text>
+                    <View style={styles.optionWrap}>
+                      {brandOptions.map((b) => {
+                        const on = brands.includes(b);
+                        return (
+                          <Pressable
+                            key={b}
+                            style={[
+                              styles.optionChip,
+                              on && styles.optionChipActive,
+                            ]}
+                            onPress={() =>
+                              setBrands((cur) =>
+                                on ? cur.filter((x) => x !== b) : [...cur, b],
+                              )
+                            }
+                          >
+                            <Text
+                              style={[
+                                styles.optionText,
+                                on && styles.optionTextActive,
+                              ]}
+                            >
+                              {b}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </>
+                )}
+              </ScrollView>
+
+              <View style={styles.sheetFooter}>
+                <Pressable style={styles.resetBtn} onPress={resetFilters}>
+                  <Text style={styles.resetText}>Reset</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.applyBtn}
+                  onPress={() => setFilterOpen(false)}
+                >
+                  <Text style={styles.applyText}>
+                    Show {visibleProducts.length} results
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
 
       {/* floating header */}
       <View
@@ -535,6 +835,86 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     gap: 6,
   },
+  filterChipActive: {
+    backgroundColor: themeLightOrange,
+    borderColor: themeIconOrange,
+  },
+  filterChipTextActive: { color: themeIconOrange, fontWeight: "700" },
+  sheetBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.4)",
+    justifyContent: "flex-end",
+  },
+  sheet: {
+    backgroundColor: "#FFFFFF",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 16,
+    maxHeight: "100%",
+  },
+  sheetHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  sheetTitle: { fontSize: 18, fontWeight: "800", color: ink },
+  sheetClose: { fontSize: 20, color: ink },
+  sheetLabel: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: muted,
+    marginTop: 16,
+    marginBottom: 8,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
+  optionWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  optionChip: {
+    borderWidth: 1,
+    borderColor: "#E0E0E0",
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: "#FFFFFF",
+  },
+  optionChipActive: {
+    borderColor: themeIconOrange,
+    backgroundColor: themeLightOrange,
+  },
+  optionText: { fontSize: 13, color: ink, fontWeight: "500" },
+  optionTextActive: { color: themeIconOrange, fontWeight: "700" },
+  priceRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  priceInput: {
+    flex: 1,
+    height: 42,
+    borderWidth: 1,
+    borderColor: "#E0E0E0",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    fontSize: 14,
+    color: ink,
+  },
+  sheetFooter: { flexDirection: "row", gap: 12, marginTop: 16 },
+  resetBtn: {
+    flex: 1,
+    height: 48,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: ink,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  resetText: { fontSize: 14, fontWeight: "700", color: ink },
+  applyBtn: {
+    flex: 2,
+    height: 48,
+    borderRadius: 14,
+    backgroundColor: themeIconOrange,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  applyText: { fontSize: 14, fontWeight: "700", color: "#FFFFFF" },
   filterChipText: {
     fontSize: 13,
     color: ink,

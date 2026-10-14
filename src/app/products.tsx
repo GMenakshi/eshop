@@ -1,3 +1,9 @@
+import { ThemedText } from "@/components/themed-text";
+import { useWishlist } from "@/context/wishlist-context";
+import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
+import { getRecentlyViewedIds } from "@/lib/recently-viewed";
+import { usePincode } from "@/lib/use-pincode";
+import { deliveryDateText } from "@/lib/delivery-text";
 import { Image } from "expo-image";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { SymbolView } from "expo-symbols";
@@ -9,14 +15,9 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
-  View,
+  View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { addRecentlyViewed, getRecentlyViewedIds } from "@/lib/recently-viewed";
-import { ThemedText } from "@/components/themed-text";
-import { useWishlist } from "@/context/wishlist-context";
-import { api, apiImageUrl, type ApiProduct } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
 
 const themeLightOrange = "#FFF4EB";
@@ -36,14 +37,19 @@ const SORT_CHIPS: { key: SortMode; label: string }[] = [
 ];
 
 const getDiscount = (p: ApiProduct) => {
-  if (typeof p.originalPrice === "number" && p.originalPrice > p.price) {
+  if (
+    p.price > 0 &&
+    typeof p.originalPrice === "number" &&
+    p.originalPrice > p.price
+  ) {
     return Math.round(((p.originalPrice - p.price) / p.originalPrice) * 100);
   }
   return null;
 };
 
 export default function ProductsScreen() {
-  const { storeId } = useStore();
+    const { storeId } = useStore();
+  const pincode = usePincode();
   const { toggle, isSaved } = useWishlist();
   const { categoryId, categoryName, mode, excludeId } = useLocalSearchParams<{
     categoryId?: string;
@@ -62,21 +68,24 @@ export default function ProductsScreen() {
     let mounted = true;
     setLoading(true);
     const load = async () => {
-  try {
-    let list: ApiProduct[] = [];
+      try {
+        let list: ApiProduct[] = [];
 
-    if (mode === "recent") {
-      const ids = await getRecentlyViewedIds(storeId);
-      const catalog = await api.allProducts(storeId);
-      const byId = new Map(catalog.map((p) => [p._id, p]));
-          list = ids.map((rid) => byId.get(rid)).filter(Boolean) as ApiProduct[];
+        if (mode === "recent") {
+          const ids = await getRecentlyViewedIds(storeId);
+          const catalog = await api.allProducts(storeId, pincode);
+          const byId = new Map(catalog.map((p) => [p._id, p]));
+          list = ids
+            .map((rid) => byId.get(rid))
+            .filter(Boolean) as ApiProduct[];
         } else if (mode === "similar" && categoryId) {
-      const response = await api.productsByCategory(storeId, categoryId);
+          const response = await api.productsByCategory(storeId, categoryId, 1, pincode);
           list = (response.products ?? []).filter((p) => p._id !== excludeId);
         } else if (categoryId && categoryId !== "all") {
-          list = (await api.productsByCategory(storeId, categoryId)).products ?? [];
+          list =
+            (await api.productsByCategory(storeId, categoryId, 1, pincode)).products ?? [];
         } else {
-          list = (await api.products(storeId)).products ?? [];
+          list = (await api.products(storeId, 1, pincode)).products ?? [];
         }
 
         if (mounted) setProducts(list);
@@ -90,7 +99,7 @@ export default function ProductsScreen() {
     return () => {
       mounted = false;
     };
-  }, [categoryId, storeId, mode, excludeId]);
+  }, [categoryId, storeId, mode, excludeId, pincode]);
 
   const visible = useMemo(() => {
     let list = products.filter((p) =>
@@ -98,8 +107,16 @@ export default function ProductsScreen() {
     );
     if (sortMode === "offers")
       list = list.filter((p) => getDiscount(p) !== null);
-    if (sortMode === "low") list = [...list].sort((a, b) => a.price - b.price);
-    if (sortMode === "high") list = [...list].sort((a, b) => b.price - a.price);
+    if (sortMode === "low")
+      list = [...list].sort(
+        (a, b) =>
+          (a.price > 0 ? a.price : Number.MAX_SAFE_INTEGER) -
+          (b.price > 0 ? b.price : Number.MAX_SAFE_INTEGER),
+      );
+    if (sortMode === "high")
+      list = [...list].sort(
+        (a, b) => (b.price > 0 ? b.price : -1) - (a.price > 0 ? a.price : -1),
+      );
     return list;
   }, [products, query, sortMode]);
 
@@ -222,15 +239,25 @@ export default function ProductsScreen() {
             {discount !== null && (
               <Text style={styles.originalPrice}>₹{item.originalPrice}</Text>
             )}
-            <Text style={styles.price}>₹{item.price}</Text>
+            <Text style={styles.price}>
+              {item.price > 0 ? `₹${item.price}` : "Order to know Price"}
+            </Text>
           </View>
 
-          <Text style={styles.delivery}>
-            Get it{" "}
-            <Text style={styles.deliveryBold}>
-              {item.deliveryTime || "Same day"}
+          {item.delivery?.deliverable === false ? (
+            <Text style={[styles.delivery, { color: "#E53935" }]}>
+              Not deliverable to your pincode
             </Text>
-          </Text>
+          ) : (
+            (!!item.delivery || !!item.deliveryTime) && (
+              <Text style={styles.delivery}>
+                Get it{" "}
+                <Text style={styles.deliveryBold}>
+                  {deliveryDateText(item.delivery, item.deliveryTime)}
+                </Text>
+              </Text>
+            )
+          )}
         </View>
       </Pressable>
     );
@@ -362,8 +389,8 @@ const styles = StyleSheet.create({
     textDecorationLine: "line-through",
   },
   price: { fontSize: 14, color: ink, fontWeight: "800" },
-  delivery: { fontSize: 11, color: muted },
-  deliveryBold: { fontStyle: "italic", fontWeight: "700" },
+  delivery: { fontSize: 12, color: "#8A8A8A", letterSpacing: 0.1 },
+  deliveryBold: { fontWeight: "600", color: "#1B7F4B" },
 
   empty: { color: muted, fontSize: 14, textAlign: "center", marginTop: 40 },
 });

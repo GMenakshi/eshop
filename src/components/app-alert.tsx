@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useBanner, type BannerKind } from "@/components/top-banner";
 import {
   Alert,
   type AlertButton,
@@ -16,11 +17,27 @@ type AlertState = {
 } | null;
 
 let setHostState: ((s: AlertState) => void) | null = null;
+let showBanner:
+  | ((b: { title: string; message?: string; kind?: BannerKind }) => void)
+  | null = null;
 const nativeAlert = Alert.alert.bind(Alert);
 
 // Every Alert.alert(...) in the app now opens the custom popup.
 // If the host isn't mounted yet, it falls back to the native one.
 Alert.alert = (title: string, message?: string, buttons?: AlertButton[]) => {
+  // Info-only alerts (no buttons, or a single plain OK) become a drop-down banner
+  const informational =
+    !buttons?.length || (buttons.length === 1 && !buttons[0].onPress);
+  if (informational && showBanner) {
+    const t = `${title} ${message ?? ""}`.toLowerCase();
+    const kind: BannerKind = /cancel|fail|error|wrong/.test(t)
+      ? "error"
+      : /confirm|deliver|success|placed|shipped/.test(t)
+        ? "success"
+        : "info";
+    showBanner({ title, message, kind });
+    return;
+  }
   if (!setHostState) {
     nativeAlert(title, message, buttons);
     return;
@@ -35,16 +52,19 @@ Alert.alert = (title: string, message?: string, buttons?: AlertButton[]) => {
 export function AppAlertHost() {
   const [state, setState] = useState<AlertState>(null);
   const [visible, setVisible] = useState(false);
+  const banner = useBanner();
 
   useEffect(() => {
+    showBanner = banner.show;
     setHostState = (s) => {
       setState(s);
       setVisible(true);
     };
     return () => {
       setHostState = null;
+      showBanner = null;
     };
-  }, []);
+  }, [banner.show]);
 
   const buttons = state
     ? [...state.buttons].sort(

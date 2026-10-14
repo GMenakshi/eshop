@@ -119,13 +119,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const payload = (response.user ?? response.data ?? {}) as Partial<ApiUser>;
       const userId = payload._id ?? payload.id;
 
-      let userAddress = payload.address;
-      if (!userAddress && userId) {
-        const local = await getSavedAddresses(userId);
-        if (local.length > 0) {
-          userAddress = local[0];
-        }
-      }
+      const saved = await getSavedAddresses(token).catch(() => []);
+      const userAddress = saved[0] ?? payload.address; // default address comes first
 
       const normalizedUser: ApiUser = {
         _id: userId,

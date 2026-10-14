@@ -10,13 +10,21 @@ export type AppNotification = {
     | "ORDER_CONFIRMED"
     | "ORDER_SHIPPED"
     | "ORDER_DELIVERED"
-    | "ORDER_CANCELLED";
+    | "ORDER_CANCELLED"
+    | "PRICE_QUOTED"
+    | "NEW_OFFER";
   title: string;
   body: string;
   storeId?: string | { _id?: string; id?: string } | null;
-  orderId?: string;
+  orderId?: string | { _id?: string } | null;
   isRead: boolean;
   createdAt: string;
+};
+
+export const notificationOrderId = (n: AppNotification): string | undefined => {
+  const raw = n.orderId;
+  const id = typeof raw === "object" && raw ? raw._id : raw;
+  return id ? String(id) : undefined;
 };
 
 export type NotificationPage = {
@@ -59,15 +67,37 @@ export async function fetchNotifications(
   return res.json();
 }
 
-export async function markRead(
-  token: string,
-  ids?: string[],
-  storeId?: string,
-) {
+export async function markRead(token: string, ids?: string[], storeId?: string) {
   const query = storeId ? `?storeId=${encodeURIComponent(storeId)}` : "";
-  await fetch(`${BASE}/read${query}`, {
+  const res = await fetch(`${BASE}/read${query}`, {
     method: "PATCH",
     headers: headers(token),
     body: ids ? JSON.stringify({ notificationIds: ids }) : undefined,
   });
+  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+}
+
+export async function deleteNotification(token: string, id: string) {
+  const res = await fetch(`${BASE}/clear-single/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: headers(token),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error("[Notifications] delete failed", res.status, res.url, body);
+    throw new Error(`Request failed (${res.status})`);
+  }
+}
+
+export async function clearAllNotifications(token: string, storeId?: string) {
+  const query = storeId ? `?storeId=${encodeURIComponent(storeId)}` : "";
+  const res = await fetch(`${BASE}/clear-all${query}`, {
+    method: "DELETE",
+    headers: headers(token),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error("[Notifications] clear-all failed", res.status, res.url, body);
+    throw new Error(`Request failed (${res.status})`);
+  }
 }

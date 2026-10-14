@@ -18,6 +18,7 @@ import {
     type ApiVariant,
 } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
+import { pickGst } from "@/lib/gst";
 
 type CartProduct = ApiProduct | (typeof catalog)[keyof typeof catalog];
 export type CartItem = {
@@ -192,6 +193,12 @@ function applyCartVariant(product: ApiProduct, item: ApiCartItem): ApiProduct {
       matchedSize?.weight ??
       (matchedGroup ? undefined : product.weight),
     variantId: resolvedVariantId,
+    gst:
+      pickGst(
+        matchedSize?.effectiveGst,
+        matchedGroup?.effectiveGst,
+        product.gst,
+      ) ?? product.gst,
     color: item.color ?? matchedGroup?.color,
     colorVariantId: item.colorVariantId ?? matchedGroup?._id,
   };
@@ -300,6 +307,7 @@ export function CartProvider({ children }: PropsWithChildren) {
             storeName: i.storeName,
             storeId: i.storeId,
           })),
+          
         );
         setCartId(
           hydratedResponse.cartId ??
@@ -557,15 +565,7 @@ export function CartProvider({ children }: PropsWithChildren) {
           quantity: nextQuantity,
           error,
         });
-        if ((error as { status?: number })?.status === 404) {
-          setItems((current) =>
-            current.filter(
-              (entry) => getCartItemLineId(entry) !== getCartItemLineId(item),
-            ),
-          );
-          return;
-        }
-        // Backend unavailable for other reasons; continue with local state
+        return; // keep the item as-is if the backend update fails
       }
     } else if (token && amount > 0 && "_id" in item.product) {
       try {

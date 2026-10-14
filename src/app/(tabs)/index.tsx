@@ -3,12 +3,14 @@ import { ThemedView } from "@/components/themed-view";
 import { useAuth } from "@/context/auth-context";
 import { useCart } from "@/context/cart-context";
 import { useWishlist } from "@/context/wishlist-context";
-import { api, API_BASE_URL, apiImageUrl } from "@/lib/api";
+import { api, API_BASE_URL, apiImageUrl, type ApiDelivery } from "@/lib/api";
+import { deliveryDateText, shippingChargeText } from "@/lib/delivery-text";
 import {
   fetchNotifications,
   filterNotificationsForStore,
 } from "@/lib/notifications-api";
 import { useStore } from "@/lib/store-context";
+import { usePincode } from "@/lib/use-pincode";
 import { useVoiceSearch } from "@/lib/use-voice-search";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -23,16 +25,18 @@ import {
   Alert,
   Animated,
   Dimensions,
+  Linking,
   Modal,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   TextInput,
   View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from "react-native";
+import { getColors } from "react-native-image-colors";
 import {
   SafeAreaProvider,
   SafeAreaView,
@@ -61,7 +65,14 @@ export type HomeProduct = {
   badge?: string;
   createdAt?: string;
   colors?: HomeProductColor[];
+  images?: string[];
+  mrp?: number;
+  hasTierPricing?: boolean;
+
+  delivery?: ApiDelivery;
   variants?: any[];
+  rating?: number;
+  reviewCount?: number;
 };
 const offerSlides = [
   {
@@ -170,6 +181,22 @@ const genderTabs = ["Man", "Women", "Kid"];
 // Banner colours: used when the API banner has no `color` field
 const bannerPresets = ["#E8875C", "#C2456B", "#7A4FD6", "#C2456B", "#2F6FDE"];
 const FOR_YOU = "for-you";
+const DEALS_GAP = 8;
+const DEALS_MARGIN = 10; // space between screen edge and the orange wrapper
+const DEALS_PAD = 8; // space between wrapper edge and the first card
+// 3.5 cards visible
+const DEALS_CARD_W = Math.floor(
+  (Dimensions.get("window").width -
+    DEALS_MARGIN * 2 -
+    DEALS_PAD -
+    DEALS_GAP * 3) /
+    3.5,
+);
+const SPOT_GAP = 10;
+const SPOT_TILE_W = Math.floor(
+  (Dimensions.get("window").width - DEALS_MARGIN * 2 - SPOT_GAP * 2) / 3,
+);
+const SPOT_TAG = "AD";
 const isHex = (v: unknown): v is string =>
   typeof v === "string" && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v.trim());
 
@@ -184,6 +211,12 @@ const hexToRgb = (hex: string) => {
       : h;
   const n = parseInt(full, 16);
   return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+};
+
+// true when a hex colour is dark enough that white text reads better
+const isDarkColor = (hex: string) => {
+  const { r, g, b } = hexToRgb(hex);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 < 0.55;
 };
 
 // amount > 0 lightens, amount < 0 darkens
@@ -235,6 +268,25 @@ const productDiscount = (p: HomeProduct) => {
   const mrp = Number(sv?.mrp ?? v?.mrp);
   const offer = Number(sv?.offerPrice ?? v?.offerPrice ?? p.price);
   return mrp > offer && offer > 0 ? Math.round(((mrp - offer) / mrp) * 100) : 0;
+};
+
+const productPricing = (p: HomeProduct) => {
+  const v = p.variants?.[0];
+  const sv = v?.sizeVariants?.[0];
+  const mrp = Number(sv?.mrp ?? v?.mrp ?? p.mrp);
+  const show = !p.hasTierPricing && mrp > p.price && p.price > 0;
+  return {
+    mrp: show ? mrp : null,
+    discount: show ? Math.round(((mrp - p.price) / mrp) * 100) : 0,
+  };
+};
+
+const DEFAULT_RATING = 4.0; // shown when the API sends no rating
+const formatCount = (n: number) =>
+  n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}K+` : String(n);
+const ratingLabel = (p: HomeProduct) => {
+  const r = p.rating && p.rating > 0 ? p.rating : DEFAULT_RATING;
+  return `${r.toFixed(1)} ★${p.reviewCount ? ` | ${formatCount(p.reviewCount)}` : ""}`;
 };
 
 const formatAddress = (a: any): string => {
@@ -289,13 +341,91 @@ function SlidingProductImage({
   );
 }
 
+function ProductImageCarousel({
+  images,
+  targetIndex,
+  onPressImage,
+}: {
+  images: string[];
+  targetIndex: number;
+  onPressImage: () => void;
+}) {
+  const ref = useRef<ScrollView>(null);
+  const [width, setWidth] = useState(0);
+  const [index, setIndex] = useState(0);
+
+  // when a colour swatch is tapped, slide to that colour's image
+  useEffect(() => {
+    if (!width) return;
+    ref.current?.scrollTo({ x: targetIndex * width, animated: true });
+    setIndex(targetIndex);
+  }, [targetIndex, width]);
+
+  return (
+    <View
+      style={{ width: "100%", height: "100%" }}
+      onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
+    >
+      {width > 0 && (
+        <ScrollView
+          ref={ref}
+          horizontal
+          pagingEnabled
+          nestedScrollEnabled
+          scrollEnabled={images.length > 1}
+          showsHorizontalScrollIndicator={false}
+          scrollEventThrottle={16}
+          onMomentumScrollEnd={(e) =>
+            setIndex(Math.round(e.nativeEvent.contentOffset.x / width))
+          }
+        >
+          {images.map((uri, i) => (
+            <Pressable
+              key={`${uri}-${i}`}
+              onPress={onPressImage}
+              style={{ width, height: width }}
+            >
+              <Image
+                source={{ uri }}
+                style={{ width: "100%", height: "100%" }}
+                contentFit="cover"
+              />
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
+      {images.length > 1 && (
+        <View style={s.carouselDots} pointerEvents="none">
+          {images.map((_, i) => (
+            <View
+              key={i}
+              style={[s.carouselDot, i === index && s.carouselDotActive]}
+            />
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
 export default function HomeScreen() {
-  console.log("HOME SCREEN LOADED v2");
+  const isFocusedRef = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      isFocusedRef.current = true;
+      setQuery("");
+      return () => {
+        isFocusedRef.current = false;
+      };
+    }, []),
+  );
+  const { storeId, activeStore } = useStore();
+
   const insets = useSafeAreaInsets();
   const { token } = useAuth();
   const { addItem, items: cartItems, changeQuantity } = useCart();
   const { toggle: toggleWishlist, isSaved: isWishlisted } = useWishlist();
-  const { storeId, activeStore } = useStore();
+  const pincode = usePincode();
   const [activeCategory, setActiveCategory] = useState(FOR_YOU);
   const [categories, setCategories] = useState<
     { id: string; name: string; image?: string; icon?: string }[]
@@ -312,15 +442,18 @@ export default function HomeScreen() {
   >([]);
   const [activeBannerIndex, setActiveBannerIndex] = useState(0);
   const [offerBanners, setOfferBanners] = useState<
-    { id: string; image: string; productId: string | null }[]
+    { id: string; name: string; image: string; productId: string | null }[]
   >([]);
   const [categoryBanners, setCategoryBanners] = useState<
     ReturnType<typeof mapBanner>[]
   >([]);
   const bgAnim = useRef(new Animated.Value(0)).current;
   const prevBannerIndexRef = useRef(0);
+  const bannerPosRef = useRef(0); // raw position, includes the cloned slide
   const bannerScrollX = useRef(new Animated.Value(0)).current;
   const bannerScrollRef = useRef<ScrollView>(null);
+  const offerScrollRef = useRef<ScrollView>(null);
+  const offerPosRef = useRef(0); // raw position, includes the cloned slide
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
@@ -329,6 +462,7 @@ export default function HomeScreen() {
   const [storeAddress, setStoreAddress] = useState("");
   const [unreadCount, setUnreadCount] = useState(0);
   const [catLayout, setCatLayout] = useState({ y: 0, h: 0 });
+  const [dealsLayout, setDealsLayout] = useState({ y: 0, h: 0 });
   const [chipsActive, setChipsActive] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [searchSuggestionIndex, setSearchSuggestionIndex] = useState(0);
@@ -374,6 +508,7 @@ export default function HomeScreen() {
   const [headerH, setHeaderH] = useState(90);
   const [adUrl, setAdUrl] = useState<string | null>(null);
   const [adReady, setAdReady] = useState(false);
+  const [adIsDark, setAdIsDark] = useState(false);
   const scrollY = useRef(new Animated.Value(0)).current;
   const activeOffer = offerSlides[offerIndex];
   const bannerPlayer = useVideoPlayer(
@@ -387,6 +522,7 @@ export default function HomeScreen() {
 
   useEffect(() => {
     const timer = setInterval(() => {
+      if (!isFocusedRef.current) return;
       Animated.sequence([
         Animated.timing(offerOpacity, {
           toValue: 0,
@@ -406,9 +542,7 @@ export default function HomeScreen() {
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setSearchSuggestionIndex(
-        (current) => (current + 1) % searchSuggestions.length,
-      );
+      setSearchSuggestionIndex((current) => current + 1);
     }, 2000);
     return () => clearInterval(timer);
   }, []);
@@ -428,6 +562,27 @@ export default function HomeScreen() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!adUrl) return;
+    let active = true;
+    getColors(adUrl, { fallback: "#f9f5ee", cache: true, key: adUrl })
+      .then((res) => {
+        const c =
+          res.platform === "android"
+            ? (res.average ?? res.dominant)
+            : res.platform === "ios"
+              ? res.background
+              : res.dominant;
+        if (active && typeof c === "string" && isHex(c)) {
+          setAdIsDark(isDarkColor(c));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [adUrl]);
 
   useFocusEffect(
     useCallback(() => {
@@ -465,7 +620,7 @@ export default function HomeScreen() {
     try {
       const [productResult, categoryResult, bannerResult] =
         await Promise.allSettled([
-          api.products(storeId),
+          api.products(storeId, 1, pincode),
           api.categories(storeId),
           api.banners(),
         ]);
@@ -478,11 +633,17 @@ export default function HomeScreen() {
         bannerResult.status === "fulfilled" ? bannerResult.value : null;
       console.log("[Banner] raw response", JSON.stringify(bannerResponse));
       try {
-        const productsUrl = `${API_BASE_URL}/product/store/${encodeURIComponent(storeId)}/products`;
+        const productsUrl = `${API_BASE_URL}/product/store/${encodeURIComponent(storeId)}/products${pincode ? `?pincode=${pincode}` : ""}`;
         const newApiRes = await fetch(productsUrl);
         const newApiJson = await newApiRes.json();
 
         const apiStore = newApiJson.store;
+        console.log(
+          "[Delivery] pincode:",
+          pincode,
+          "first product:",
+          JSON.stringify(newApiJson.products?.[0]?.delivery),
+        );
         console.log("[Store] from products API", JSON.stringify(apiStore));
         const fetchedName =
           apiStore?.storeName ?? apiStore?.name ?? apiStore?.title;
@@ -517,8 +678,23 @@ export default function HomeScreen() {
               deliveryTime: product.deliveryTime,
               productCode: product.productCode,
               createdAt: product.createdAt,
+              mrp: product.mrp,
+              hasTierPricing: product.hasTierPricing,
               colors,
-              variants: product.variants ?? [],
+              images: Array.from(
+                new Set(
+                  [
+                    ...(product.images ?? []),
+                    ...colors.map((c) => c.image),
+                  ].filter(Boolean),
+                ),
+              ),
+              delivery: product.delivery ?? undefined,
+              rating:
+                Number(product.rating ?? product.averageRating) || undefined,
+              reviewCount:
+                Number(product.totalReviews ?? product.reviewCount) ||
+                undefined,
             };
           }),
         );
@@ -578,7 +754,7 @@ export default function HomeScreen() {
     setSelectedColorIndex({});
     if (!storeId) return;
     void loadHomeData();
-  }, [storeId]);
+  }, [storeId, pincode]);
 
   useEffect(() => {
     if (activeCategory === FOR_YOU) {
@@ -636,6 +812,7 @@ export default function HomeScreen() {
             })
             .map((b: any) => ({
               id: String(b._id),
+              name: typeof b.name === "string" ? b.name : "",
               image: apiImageUrl(b.image) ?? b.image,
               productId: b.productId
                 ? String(
@@ -708,19 +885,120 @@ export default function HomeScreen() {
       .slice(0, 8);
   }, [products]);
 
-  // Auto-slide the hero banners
+  // products with the biggest offers: highest % off first, then bulk-price products
+  const spotlightProducts = useMemo(() => {
+    const scored = products.map((p) => ({
+      p,
+      d: productPricing(p).discount,
+    }));
+    const discounted = scored.filter((x) => x.d > 0).sort((a, b) => b.d - a.d);
+    const bulk = scored.filter((x) => x.d === 0 && x.p.hasTierPricing);
+    const rest = scored.filter(
+      (x) => !discounted.includes(x) && !bulk.includes(x),
+    );
+    const list = [...discounted, ...bulk, ...rest].slice(0, 6);
+    // only full rows of 3: 3 or 6 products, never a half-empty row
+    return list.slice(0, Math.floor(list.length / 3) * 3).map((x) => x.p);
+  }, [products]);
+
+  // Auto-slide the hero banners (always the same direction)
   useEffect(() => {
     if (visibleBanners.length < 2) return;
     const cardWidth = Dimensions.get("window").width - 48 + 12;
+    const count = visibleBanners.length;
+    let resetTimer: ReturnType<typeof setTimeout> | undefined;
     const timer = setInterval(() => {
-      const next = (prevBannerIndexRef.current + 1) % visibleBanners.length;
+      const next = bannerPosRef.current + 1; // may be the cloned slide (= count)
       bannerScrollRef.current?.scrollTo({
         x: next * cardWidth,
         animated: true,
       });
+      if (next >= count) {
+        // after the slide animation, jump back to the real first banner
+        resetTimer = setTimeout(() => {
+          bannerScrollRef.current?.scrollTo({ x: 0, animated: false });
+          bannerPosRef.current = 0;
+        }, 500);
+      }
     }, 4000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      if (resetTimer) clearTimeout(resetTimer);
+    };
   }, [visibleBanners.length, activeCategory]);
+
+  // ─── Offer banner slider ───
+  const offerCardWidth = Dimensions.get("window").width - DEALS_MARGIN * 2;
+  const offerSlidesData: {
+    id: string;
+    image: string;
+    productId: string | null;
+    title: string;
+  }[] =
+    offerBanners.length > 0
+      ? offerBanners.map((b) => ({
+          id: b.id,
+          image: b.image,
+          productId: b.productId,
+          title:
+            b.name || visibleBanners[1]?.name || "Bundle & Save\nThis Week",
+        }))
+      : visibleBanners.length > 1
+        ? [
+            {
+              id: visibleBanners[1].id,
+              image: visibleBanners[1].image,
+              productId: visibleBanners[1].productId,
+              title: visibleBanners[1].name,
+            },
+          ]
+        : [
+            {
+              id: "offer-fallback",
+              image: "",
+              productId: null,
+              title: "Bundle & Save\nThis Week",
+            },
+          ];
+  const showOfferSection = isForYou || visibleBanners.length > 1;
+
+  // Auto-slide the offer banners (always the same direction)
+  useEffect(() => {
+    offerPosRef.current = 0;
+    if (offerSlidesData.length < 2) return;
+    const step = offerCardWidth + 12;
+    const count = offerSlidesData.length;
+    let resetTimer: ReturnType<typeof setTimeout> | undefined;
+    const timer = setInterval(() => {
+      const next = offerPosRef.current + 1; // may be the cloned slide
+      offerScrollRef.current?.scrollTo({ x: next * step, animated: true });
+      if (next >= count) {
+        resetTimer = setTimeout(() => {
+          offerScrollRef.current?.scrollTo({ x: 0, animated: false });
+          offerPosRef.current = 0;
+        }, 500);
+      }
+    }, 4500);
+    return () => {
+      clearInterval(timer);
+      if (resetTimer) clearTimeout(resetTimer);
+    };
+  }, [offerSlidesData.length, activeCategory]);
+
+  const handleOfferScroll = (
+    event: NativeSyntheticEvent<NativeScrollEvent>,
+  ) => {
+    offerPosRef.current = Math.round(
+      event.nativeEvent.contentOffset.x / (offerCardWidth + 12),
+    );
+  };
+
+  const handleOfferMomentumEnd = () => {
+    if (offerPosRef.current >= offerSlidesData.length) {
+      offerScrollRef.current?.scrollTo({ x: 0, animated: false });
+      offerPosRef.current = 0;
+    }
+  };
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const y = event.nativeEvent.contentOffset.y ?? 0;
@@ -750,7 +1028,7 @@ export default function HomeScreen() {
 
     setRecentSearches(nextRecentSearches);
     await saveRecentSearches(nextRecentSearches);
-    setQuery(normalizedValue);
+    setQuery("");
     setSearchOpen(false);
     router.push({ pathname: "/search", params: { query: normalizedValue } });
   };
@@ -760,7 +1038,7 @@ export default function HomeScreen() {
   }, searchOpen);
 
   const selectRecentSearch = (value: string) => {
-    setQuery(value);
+    setQuery("");
     setSearchOpen(false);
     router.push({ pathname: "/search", params: { query: value } });
   };
@@ -773,6 +1051,13 @@ export default function HomeScreen() {
   const addProduct = async (product: HomeProduct) => {
     if (!token) {
       router.push("/sign-in");
+      return;
+    }
+    if (product.delivery?.deliverable === false) {
+      Alert.alert(
+        "Not deliverable",
+        "This product can't be delivered to your pincode.",
+      );
       return;
     }
     try {
@@ -826,7 +1111,8 @@ export default function HomeScreen() {
       const x = event.nativeEvent.contentOffset.x;
       bannerScrollX.setValue(x / cardWidth);
       const idx = Math.round(x / cardWidth);
-      const clamped = Math.max(0, Math.min(idx, visibleBanners.length - 1));
+      bannerPosRef.current = idx;
+      const clamped = idx >= visibleBanners.length ? 0 : Math.max(0, idx);
       if (clamped !== prevBannerIndexRef.current) {
         prevBannerIndexRef.current = clamped;
         setActiveBannerIndex(clamped);
@@ -835,7 +1121,16 @@ export default function HomeScreen() {
     [visibleBanners.length],
   );
 
+  // If the user swipes onto the cloned slide, jump to the real first one
+  const handleBannerMomentumEnd = () => {
+    if (bannerPosRef.current >= visibleBanners.length) {
+      bannerScrollRef.current?.scrollTo({ x: 0, animated: false });
+      bannerPosRef.current = 0;
+    }
+  };
+
   const selectCategory = (id: string) => {
+    bannerPosRef.current = 0;
     bannerScrollX.setValue(0);
     setActiveCategory(id);
     setActiveBannerIndex(0);
@@ -856,6 +1151,27 @@ export default function HomeScreen() {
     [activeBannerColor],
   );
 
+  const openStoreInMaps = async () => {
+    if (!storeAddress) return;
+    const label = storeName || activeStore?.name || "";
+    const query = encodeURIComponent(
+      label ? `${label}, ${storeAddress}` : storeAddress,
+    );
+    // This link opens the Google Maps app if installed, otherwise the browser
+    const url = `https://www.google.com/maps/search/?api=1&query=${query}`;
+    try {
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert("Could not open Maps", "Please try again.");
+    }
+  };
+
+  const placeholderTerms = categories.length
+    ? categories.map((c) => c.name)
+    : searchSuggestions;
+  const placeholderTerm =
+    placeholderTerms[searchSuggestionIndex % placeholderTerms.length];
+
   const renderSearchPill = () => (
     <Pressable
       style={[
@@ -874,17 +1190,27 @@ export default function HomeScreen() {
         value={query}
         editable={false}
         pointerEvents="none"
-        placeholder={`Search styles, brands..`}
+        placeholder={`Search "${placeholderTerm}"`}
         placeholderTextColor="#AAAAAA"
         style={s.searchInput}
       />
-      <View style={s.searchOrangeBtn}>
+      <Pressable
+        style={s.searchOrangeBtn}
+        accessibilityLabel="Open filters"
+        hitSlop={8}
+        onPress={() =>
+          router.push({
+            pathname: "/search",
+            params: { query: "", filter: "1" },
+          })
+        }
+      >
         <SymbolView
           name={{ ios: "slider.horizontal.3", android: "tune", web: "tune" }}
           size={16}
           tintColor="#FFFFFF"
         />
-      </View>
+      </Pressable>
     </Pressable>
   );
 
@@ -909,6 +1235,17 @@ export default function HomeScreen() {
     outputRange: [0, 1],
     extrapolate: "clamp",
   });
+
+  // light text on a dark GIF, dark text otherwise
+  const catTextColor = adUrl && adReady && adIsDark ? "#FFFFFF" : "#444444";
+
+  // background covers header, banner, categories and New Arrivals
+  const bgHeight =
+    isForYou && dealsLayout.h > 0
+      ? dealsLayout.y + dealsLayout.h + 16
+      : catLayout.h > 0
+        ? catLayout.y + catLayout.h + 16
+        : 400;
 
   return (
     <ThemedView style={s.screen}>
@@ -937,7 +1274,10 @@ export default function HomeScreen() {
         >
           {/* ─── Top Gradient Background ─── */}
           {/* ─── Top Background: ad media, gradient as fallback ─── */}
-          <View style={s.topGradientWrap} pointerEvents="none">
+          <View
+            style={[s.topGradientWrap, { height: bgHeight }]}
+            pointerEvents="none"
+          >
             {adUrl && (
               <>
                 <Image
@@ -955,13 +1295,13 @@ export default function HomeScreen() {
                 />
                 {adReady && (
                   <LinearGradient
-                    colors={["rgba(250,250,250,0)", "#FAFAFA"]}
+                    colors={["rgba(249,245,238,0)", "#f9f5ee"]}
                     style={{
                       position: "absolute",
                       left: 0,
                       right: 0,
                       bottom: 0,
-                      height: 160,
+                      height: 50,
                     }}
                   />
                 )}
@@ -1011,9 +1351,18 @@ export default function HomeScreen() {
                 {storeName || activeStore?.name || "Store"}
               </ThemedText>
               {!!storeAddress && (
-                <ThemedText style={s.storeAddress} numberOfLines={1}>
-                  {storeAddress}
-                </ThemedText>
+                <Pressable
+                  onPress={() => void openStoreInMaps()}
+                  accessibilityRole="link"
+                  accessibilityLabel="Open store address in Google Maps"
+                  hitSlop={8}
+                  style={s.storeAddressRow}
+                >
+                  <Ionicons name="location-sharp" size={13} color="#FFFFFF" />
+                  <ThemedText style={s.storeAddress} numberOfLines={1}>
+                    {storeAddress}
+                  </ThemedText>
+                </Pressable>
               )}
             </View>
             <View style={s.headerActions}>
@@ -1073,9 +1422,19 @@ export default function HomeScreen() {
               style={s.heroBannerWrap}
               contentContainerStyle={{ gap: 12 }}
               onScroll={handleBannerScroll}
+              onMomentumScrollEnd={handleBannerMomentumEnd}
               scrollEventThrottle={16}
             >
-              {visibleBanners.map((banner) => (
+              {(visibleBanners.length > 1
+                ? [
+                    ...visibleBanners,
+                    {
+                      ...visibleBanners[0],
+                      id: `${visibleBanners[0].id}-clone`,
+                    },
+                  ]
+                : visibleBanners
+              ).map((banner) => (
                 <Pressable
                   key={banner.id}
                   style={s.heroCard}
@@ -1192,7 +1551,7 @@ export default function HomeScreen() {
                         name={cat.icon}
                         size={26}
                         color={
-                          activeCategory === cat.id ? "#E8875C" : "#444444"
+                          activeCategory === cat.id ? "#E8875C" : "#1A1A1A"
                         }
                       />
                     ) : (
@@ -1201,66 +1560,41 @@ export default function HomeScreen() {
                       </ThemedText>
                     )}
                   </View>
-                  <ThemedText style={s.categoryLabel}>{cat.name}</ThemedText>
+                  <ThemedText
+                    style={[s.categoryLabel, { color: catTextColor }]}
+                  >
+                    {cat.name}
+                  </ThemedText>
                 </Pressable>
               ))}
             </ScrollView>
           </View>
 
-          {/* ─── New Arrivals ─── */}
+          {/* ─── New Arrivals (Deals style) ─── */}
           {isForYou && flashProducts.length > 0 && (
-            <View style={s.flashWrap}>
-              <View style={s.flashBanner}>
-                <ThemedText style={s.flashTitle}>NEW ARRIVALS</ThemedText>
-              </View>
-              <ThemedText style={s.flashSub}>JUST LANDED</ThemedText>
+            <LinearGradient
+              colors={["#FFE3C8", "#FFA877", "#F0603F"]}
+              start={{ x: 0.5, y: 0 }}
+              end={{ x: 0.5, y: 1 }}
+              style={s.dealsWrap}
+              onLayout={(e) =>
+                setDealsLayout({
+                  y: e.nativeEvent.layout.y,
+                  h: e.nativeEvent.layout.height,
+                })
+              }
+            >
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
-                contentContainerStyle={s.flashRow}
+                contentContainerStyle={s.dealsRow}
               >
-                {flashProducts.map((product) => (
-                  <Pressable
-                    key={product.id}
-                    style={s.flashCard}
-                    onPress={() =>
-                      router.push({
-                        pathname: "/product/[id]",
-                        params: { id: product.id },
-                      })
-                    }
-                  >
-                    <Image
-                      source={{ uri: product.image }}
-                      style={s.flashImage}
-                      contentFit="cover"
-                    />
-                  </Pressable>
-                ))}
-              </ScrollView>
-            </View>
-          )}
-
-          {/* ─── For You ─── */}
-          {isForYou && products.length > 0 && (
-            <View style={s.forYouSection}>
-              <View style={s.featuredHeader}>
-                <ThemedText style={s.sectionTitle}>For You</ThemedText>
-                <Pressable onPress={() => router.push("/products")}>
-                  <ThemedText style={s.seeAllText}>See All</ThemedText>
-                </Pressable>
-              </View>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={s.forYouRow}
-              >
-                {products.slice(0, 10).map((product) => {
-                  const isSaved = isWishlisted(product.id);
+                {flashProducts.map((product) => {
+                  const { discount } = productPricing(product);
                   return (
                     <Pressable
                       key={product.id}
-                      style={s.forYouCard}
+                      style={s.dealsCard}
                       onPress={() =>
                         router.push({
                           pathname: "/product/[id]",
@@ -1268,126 +1602,174 @@ export default function HomeScreen() {
                         })
                       }
                     >
-                      <View style={s.forYouImageWrap}>
+                      <View style={s.dealsImageBox}>
                         <Image
                           source={{ uri: product.image }}
-                          style={s.forYouImage}
+                          style={s.dealsImage}
                           contentFit="cover"
                         />
-                        <Pressable
-                          style={s.heartBtn}
-                          onPress={(event) => {
-                            event.stopPropagation();
-                            void toggleWishlist(product);
-                          }}
-                        >
-                          <Ionicons
-                            name={isSaved ? "heart" : "heart-outline"}
-                            size={18}
-                            color={isSaved ? "#E8634A" : "#444444"}
-                          />
-                        </Pressable>
                       </View>
-                      <ThemedText style={s.forYouName} numberOfLines={1}>
+                      <ThemedText style={s.dealsLabel} numberOfLines={1}>
                         {product.name}
                       </ThemedText>
-                      <ThemedText style={s.forYouPrice}>
-                        {product.price > 0
-                          ? `₹${product.price}`
-                          : "PRICE ON REQUEST"}
-                      </ThemedText>
+
+                      {discount > 0 && (
+                        <View style={s.dealsBadge}>
+                          <ThemedText style={s.dealsBadgeText}>
+                            ↓{discount}%
+                          </ThemedText>
+                        </View>
+                      )}
                     </Pressable>
                   );
                 })}
               </ScrollView>
+            </LinearGradient>
+          )}
+
+          {/* ─── Top Deals ─── */}
+          {isForYou && spotlightProducts.length > 0 && (
+            <View style={s.spotSection}>
+              <ThemedText style={s.spotTitle}>Top Deals</ThemedText>
+              <View style={s.spotGrid}>
+                {Array.from(
+                  { length: Math.ceil(spotlightProducts.length / 3) },
+                  (_, r) => spotlightProducts.slice(r * 3, r * 3 + 3),
+                ).map((row, r) => (
+                  <View key={r} style={s.spotRow}>
+                    {row.map((product, idx) => {
+                      const { discount } = productPricing(product);
+                      return (
+                        <Pressable
+                          key={product.id}
+                          style={s.spotTile}
+                          onPress={() =>
+                            router.push({
+                              pathname: "/product/[id]",
+                              params: { id: product.id },
+                            })
+                          }
+                        >
+                          <View style={s.spotCard}>
+                            <Image
+                              source={{ uri: product.image }}
+                              style={s.spotImage}
+                              contentFit="cover"
+                            />
+                            <View style={s.spotTag}>
+                              <ThemedText style={s.spotTagText}>
+                                {SPOT_TAG}
+                              </ThemedText>
+                            </View>
+                            <View
+                              style={[
+                                s.spotBand,
+                                {
+                                  backgroundColor:
+                                    idx === 2 ? "#8A55E8" : "#4338DC",
+                                },
+                              ]}
+                            >
+                              <ThemedText
+                                style={s.spotBandText}
+                                numberOfLines={1}
+                                adjustsFontSizeToFit
+                                minimumFontScale={0.7}
+                              >
+                                {discount > 0
+                                  ? `${discount}% Off`
+                                  : "Bulk deal"}
+                              </ThemedText>
+                            </View>
+                          </View>
+                          <ThemedText style={s.spotCaption} numberOfLines={2}>
+                            {product.name}
+                          </ThemedText>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                ))}
+              </View>
             </View>
           )}
 
-          {/* ─── Secondary Banner ─── */}
-          {!isForYou &&
-          visibleBanners.length <= 1 ? null : visibleBanners.length > 1 ? (
-            <View style={s.secondaryBannerWrap}>
-              <View style={s.secondaryBannerCard}>
-                <LinearGradient
-                  colors={
-                    buildPalette(visibleBanners[1].color).hero as unknown as [
-                      string,
-                      string,
-                      string,
-                    ]
-                  }
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={StyleSheet.absoluteFill}
-                />
-                <View style={s.secondaryBannerTextArea}>
-                  <View style={s.heroNewBadge}>
-                    <ThemedText style={s.heroNewBadgeText}>
-                      LIMITED TIME
+          {/* ─── Offer Banners (slider) ─── */}
+          {showOfferSection && (
+            <ScrollView
+              key={`offer-${offerSlidesData.length}`}
+              ref={offerScrollRef}
+              horizontal
+              pagingEnabled
+              snapToInterval={offerCardWidth + 12}
+              decelerationRate="fast"
+              showsHorizontalScrollIndicator={false}
+              scrollEnabled={offerSlidesData.length > 1}
+              style={s.secondaryBannerWrap}
+              contentContainerStyle={{ gap: 12 }}
+              onScroll={handleOfferScroll}
+              onMomentumScrollEnd={handleOfferMomentumEnd}
+              scrollEventThrottle={16}
+            >
+              {(offerSlidesData.length > 1
+                ? [
+                    ...offerSlidesData,
+                    {
+                      ...offerSlidesData[0],
+                      id: `${offerSlidesData[0].id}-clone`,
+                    },
+                  ]
+                : offerSlidesData
+              ).map((slide) => (
+                <View key={slide.id} style={s.offerCard}>
+                  <LinearGradient
+                    colors={["#F8F2E8", "#F3EADB", "#EDE1CE"]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={StyleSheet.absoluteFill}
+                  />
+                  <View style={s.offerTextArea}>
+                    <View style={s.offerBadge}>
+                      <ThemedText style={s.offerBadgeText}>
+                        LIMITED TIME
+                      </ThemedText>
+                    </View>
+                    <ThemedText style={s.offerTitle} numberOfLines={2}>
+                      {slide.title}
                     </ThemedText>
+                    {!!slide.productId && (
+                      <Pressable
+                        style={s.heroTryBtn}
+                        onPress={() =>
+                          router.push({
+                            pathname: "/product/[id]",
+                            params: { id: slide.productId! },
+                          })
+                        }
+                      >
+                        <ThemedText style={s.heroTryBtnText}>
+                          SHOP NOW
+                        </ThemedText>
+                      </Pressable>
+                    )}
                   </View>
-                  <ThemedText style={s.secondaryBannerTitle} numberOfLines={2}>
-                    {visibleBanners[1].name}
-                  </ThemedText>
-                  {visibleBanners[1].productId && (
-                    <Pressable
-                      style={s.heroTryBtn}
-                      onPress={() =>
-                        router.push({
-                          pathname: "/product/[id]",
-                          params: { id: visibleBanners[1].productId! },
-                        })
-                      }
-                    >
-                      <ThemedText style={s.heroTryBtnText}>SHOP NOW</ThemedText>
-                    </Pressable>
+                  {!!slide.image && (
+                    <Image
+                      source={{ uri: slide.image }}
+                      style={s.offerImage}
+                      contentFit="cover"
+                    />
                   )}
                 </View>
-                <Image
-                  source={{ uri: offerImage || visibleBanners[1].image }}
-                  style={s.secondaryBannerImage}
-                  contentFit="cover"
-                />
-              </View>
-            </View>
-          ) : (
-            <View style={s.secondaryBannerWrap}>
-              <View style={s.secondaryBannerCard}>
-                <LinearGradient
-                  colors={["#d7c3a5", "#d7c3a5", "#d7c3a5"]}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={StyleSheet.absoluteFill}
-                />
-                <View style={s.secondaryBannerTextArea}>
-                  <View style={s.heroNewBadge}>
-                    <ThemedText style={s.heroNewBadgeText}>
-                      LIMITED TIME
-                    </ThemedText>
-                  </View>
-                  <ThemedText style={s.secondaryBannerTitle}>
-                    Bundle & Save{"\n"}This Week
-                  </ThemedText>
-                  <Pressable style={s.heroTryBtn}>
-                    <ThemedText style={s.heroTryBtnText}>SHOP NOW</ThemedText>
-                  </Pressable>
-                </View>
-                {!!offerImage && (
-                  <Image
-                    source={{ uri: offerImage }}
-                    style={s.secondaryBannerImage}
-                    contentFit="cover"
-                  />
-                )}
-              </View>
-            </View>
+              ))}
+            </ScrollView>
           )}
 
           {/* ─── Featured Products ─── */}
           <View style={s.featuredSection}>
             <View style={s.featuredHeader}>
               <ThemedText style={s.sectionTitle}>
-                {isForYou ? "Featured Products" : activeCategoryName}
+                {isForYou ? "More Products" : activeCategoryName}
               </ThemedText>
               <Pressable
                 onPress={() =>
@@ -1411,6 +1793,11 @@ export default function HomeScreen() {
                 const cartItem = cartItems.find(
                   (item) => item.id === product.id,
                 );
+                const pricing = productPricing(product);
+                const ratingText = ratingLabel(product);
+                const dlv = product.delivery;
+                const notDeliverable = dlv?.deliverable === false;
+                const chargeText = shippingChargeText(dlv);
 
                 return (
                   <View key={product.id} style={s.productSlot}>
@@ -1424,14 +1811,26 @@ export default function HomeScreen() {
                       }
                     >
                       <View style={s.productImageWrap}>
-                        <SlidingProductImage
+                        <ProductImageCarousel
                           images={
-                            product.colors?.length
-                              ? product.colors.map((c) => c.image)
+                            product.images?.length
+                              ? product.images
                               : [product.image]
                           }
-                          activeIndex={selectedColorIndex[product.id] ?? 0}
-                          style={s.productImage}
+                          targetIndex={Math.max(
+                            0,
+                            (product.images ?? []).indexOf(
+                              product.colors?.[
+                                selectedColorIndex[product.id] ?? 0
+                              ]?.image ?? "",
+                            ),
+                          )}
+                          onPressImage={() =>
+                            router.push({
+                              pathname: "/product/[id]",
+                              params: { id: product.id },
+                            })
+                          }
                         />
                         <Pressable
                           style={s.heartBtn}
@@ -1446,6 +1845,11 @@ export default function HomeScreen() {
                             color={isSaved ? "#E8634A" : "#444444"}
                           />
                         </Pressable>
+                        <View style={s.gridRatingBadge} pointerEvents="none">
+                          <ThemedText style={s.gridRatingText}>
+                            {ratingText}
+                          </ThemedText>
+                        </View>
                         {cartItem ? (
                           <View style={s.cartControls}>
                             <Pressable
@@ -1498,14 +1902,70 @@ export default function HomeScreen() {
                         )}
                       </View>
                       <View style={s.productInfo}>
-                        <ThemedText style={s.productName} numberOfLines={1}>
+                        <ThemedText style={s.gridBrandLabel} numberOfLines={1}>
+                          ✓ Assured {storeName || activeStore?.name || "Store"}
+                        </ThemedText>
+                        <ThemedText style={s.gridTitle} numberOfLines={1}>
                           {product.name}
                         </ThemedText>
-                        <ThemedText style={s.productPrice}>
-                          {product.price > 0
-                            ? `₹${product.price}`
-                            : "PRICE ON REQUEST"}
-                        </ThemedText>
+                        {product.price > 0 ? (
+                          <View style={s.gridPriceRow}>
+                            {pricing.discount > 0 && (
+                              <ThemedText style={s.gridDiscount}>
+                                ↓{pricing.discount}%
+                              </ThemedText>
+                            )}
+                            {pricing.mrp !== null && (
+                              <ThemedText style={s.gridOriginalPrice}>
+                                ₹{pricing.mrp.toFixed(0)}
+                              </ThemedText>
+                            )}
+                            <ThemedText style={s.gridCurrentPrice}>
+                              ₹{product.price.toFixed(0)}
+                            </ThemedText>
+                          </View>
+                        ) : (
+                          <ThemedText style={s.gridCurrentPrice}>
+                            CLICK ORDER FOR PRICE
+                          </ThemedText>
+                        )}
+                        {notDeliverable ? (
+                          <ThemedText
+                            style={s.gridNotDeliverable}
+                            numberOfLines={2}
+                          >
+                            {dlv?.label || "Not deliverable to your pincode"}
+                          </ThemedText>
+                        ) : (
+                          <>
+                            <ThemedText style={s.gridDelivery}>
+                              Get it{" "}
+                              <ThemedText style={s.gridDeliveryDate}>
+                                {deliveryDateText(dlv, product.deliveryTime)}
+                              </ThemedText>
+                            </ThemedText>
+                            {!!chargeText && (
+                              <ThemedText
+                                style={[
+                                  s.gridDelivery,
+                                  chargeText === "Free delivery" &&
+                                    s.gridFreeDelivery,
+                                ]}
+                              >
+                                {chargeText}
+                                {chargeText !== "Free delivery" &&
+                                !!dlv?.freeDeliveryAbove
+                                  ? ` · Free above ₹${dlv.freeDeliveryAbove}`
+                                  : ""}
+                              </ThemedText>
+                            )}
+                            {!dlv && !pincode && (
+                              <ThemedText style={s.gridDelivery}>
+                                Add pincode for exact delivery time
+                              </ThemedText>
+                            )}
+                          </>
+                        )}
                       </View>
                       {product.colors && product.colors.length > 1 && (
                         <View style={s.colorSwatchRow}>
@@ -1620,13 +2080,19 @@ export default function HomeScreen() {
         visible={searchOpen}
         animationType="slide"
         presentationStyle="fullScreen"
-        onRequestClose={() => setSearchOpen(false)}
+        onRequestClose={() => {
+          setSearchOpen(false);
+          setQuery("");
+        }}
       >
         <SafeAreaProvider>
           <SafeAreaView style={s.searchScreen}>
             <View style={s.searchScreenTopBar}>
               <Pressable
-                onPress={() => setSearchOpen(false)}
+                onPress={() => {
+                  setSearchOpen(false);
+                  setQuery("");
+                }}
                 accessibilityLabel="Close search"
                 style={s.searchScreenClose}
               >
@@ -1651,7 +2117,6 @@ export default function HomeScreen() {
                   tintColor="#999"
                 />
                 <TextInput
-                  autoFocus
                   value={query}
                   onChangeText={setQuery}
                   placeholder={
@@ -1826,7 +2291,7 @@ export default function HomeScreen() {
 
 const s = StyleSheet.create({
   /* ─── Layout ─── */
-  screen: { flex: 1, backgroundColor: "#FAFAFA" },
+  screen: { flex: 1, backgroundColor: "#f9f5ee" },
   offerBannerWrap: { marginHorizontal: 24, marginBottom: 28 },
   offerBannerImage: {
     width: "100%",
@@ -1867,11 +2332,18 @@ const s = StyleSheet.create({
     color: "#FFFFFF",
     letterSpacing: -0.5,
   },
+  storeAddressRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 2,
+    paddingRight: 8,
+  },
   storeAddress: {
+    flexShrink: 1,
     fontSize: 12,
     fontWeight: "500",
     color: "#FFFFFF",
-    marginTop: 2,
   },
   headerActions: {
     flexDirection: "row",
@@ -2016,7 +2488,7 @@ const s = StyleSheet.create({
   /* ─── Categories ─── */
   categoriesSection: {
     paddingHorizontal: 0,
-    marginBottom: 28,
+    marginBottom: 8,
   },
   categoriesHeader: {
     flexDirection: "row",
@@ -2095,7 +2567,7 @@ const s = StyleSheet.create({
 
   /* ─── Featured Products ─── */
   featuredSection: {
-    paddingHorizontal: 24,
+    paddingHorizontal: DEALS_MARGIN,
   },
   featuredHeader: {
     flexDirection: "row",
@@ -2140,6 +2612,36 @@ const s = StyleSheet.create({
   productImage: {
     width: "100%",
     height: "100%",
+  },
+  gridRatingBadge: {
+    position: "absolute",
+    left: 8,
+    bottom: 8,
+    backgroundColor: "rgba(255,255,255,0.9)",
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 4,
+    zIndex: 4,
+  },
+  gridRatingText: { fontSize: 10, fontWeight: "700", color: "#1A1A1A" },
+  carouselDots: {
+    position: "absolute",
+    bottom: 8,
+    left: 0,
+    right: 0,
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 4,
+  },
+  carouselDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "rgba(255,255,255,0.6)",
+  },
+  carouselDotActive: {
+    width: 14,
+    backgroundColor: "#FFFFFF",
   },
   heartBtn: {
     position: "absolute",
@@ -2198,19 +2700,61 @@ const s = StyleSheet.create({
     textAlign: "center",
   },
   productInfo: {
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 12,
   },
-  productName: {
+  gridBrandLabel: {
+    fontSize: 11,
+    color: "#737373",
+    fontWeight: "600",
+    marginBottom: 2,
+  },
+  gridTitle: {
     fontSize: 13,
-    fontWeight: "700",
     color: "#1A1A1A",
+    marginBottom: 6,
+  },
+  gridPriceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     marginBottom: 4,
   },
-  productPrice: {
-    fontSize: 15,
-    fontWeight: "800",
+  gridDiscount: {
+    fontSize: 13,
+    color: "#3FA35E",
+    fontWeight: "700",
+  },
+  gridOriginalPrice: {
+    fontSize: 13,
+    color: "#737373",
+    textDecorationLine: "line-through",
+  },
+  gridCurrentPrice: {
+    fontSize: 14,
     color: "#1A1A1A",
+    fontWeight: "800",
+  },
+  gridDelivery: {
+    fontSize: 12,
+    color: "#8A8A8A",
+    letterSpacing: 0.1,
+    marginTop: 1,
+  },
+  gridDeliveryDate: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#1B7F4B",
+  },
+  gridFreeDelivery: {
+    color: "#3FA35E",
+    fontWeight: "700",
+  },
+  gridNotDeliverable: {
+    fontSize: 11,
+    color: "#E53935",
+    fontWeight: "700",
   },
   colorSwatchRow: {
     flexDirection: "row",
@@ -2380,6 +2924,119 @@ const s = StyleSheet.create({
     fontWeight: "700",
     color: "#1A1A1A",
   },
+  /* ─── Deals style (New Arrivals) ─── */
+  dealsWrap: {
+    marginHorizontal: DEALS_MARGIN,
+    marginBottom: 24,
+    borderRadius: 24,
+    paddingTop: 12,
+    paddingBottom: 12,
+    overflow: "hidden",
+  },
+  dealsTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#2B2733",
+    marginLeft: 20,
+    marginBottom: 16,
+  },
+  dealsRow: { paddingHorizontal: DEALS_PAD, gap: DEALS_GAP },
+  dealsCard: {
+    width: DEALS_CARD_W,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 14,
+    padding: 4,
+    paddingBottom: 8,
+    overflow: "hidden",
+  },
+  dealsImageBox: {
+    width: "100%",
+    aspectRatio: 1,
+    borderRadius: 10,
+    backgroundColor: "#F0F0F0",
+    overflow: "hidden",
+  },
+  dealsImage: { width: "100%", height: "100%" },
+  dealsLabel: {
+    marginTop: 6,
+    marginHorizontal: 2,
+    fontSize: 11,
+    fontWeight: "500",
+    color: "#6F6F6F",
+  },
+  dealsPrice: {
+    marginTop: 1,
+    marginHorizontal: 2,
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#1A1A1A",
+  },
+  dealsBadge: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    backgroundColor: "#2F6FED",
+    borderTopLeftRadius: 14,
+    borderBottomRightRadius: 8,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  dealsBadgeText: { color: "#FFFFFF", fontSize: 10, fontWeight: "800" },
+
+  /* ─── Brands in Spotlight ─── */
+  spotSection: { paddingHorizontal: DEALS_MARGIN, marginBottom: 28 },
+  spotTitle: {
+    fontSize: 24,
+    fontWeight: "800",
+    color: "#1A1A1A",
+    marginBottom: 16,
+  },
+  spotGrid: { rowGap: 18 },
+  spotRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    columnGap: SPOT_GAP,
+  },
+  spotTile: { width: SPOT_TILE_W },
+  spotCard: {
+    width: "100%",
+    borderRadius: 18,
+    overflow: "hidden",
+    backgroundColor: "#F1F1F1",
+  },
+  spotImage: { width: "100%", height: SPOT_TILE_W * 1.02 },
+  spotTag: {
+    position: "absolute",
+    top: 7,
+    right: 7,
+    backgroundColor: "rgba(255,255,255,0.6)",
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  spotTagText: {
+    color: "#7a7a7a",
+    fontSize: 9,
+    fontWeight: "800",
+  },
+  spotBand: {
+    height: 26,
+    marginTop: -12,
+    borderTopLeftRadius: 14,
+    borderTopRightRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+  spotBandText: { color: "#FFFFFF", fontSize: 11, fontWeight: "800" },
+  spotCaption: {
+    marginTop: 7,
+    textAlign: "center",
+    fontSize: 12,
+    fontWeight: "400",
+    color: "#1A1A1A",
+    minHeight: 32,
+  },
   flashWrap: {
     marginHorizontal: 24,
     marginBottom: 28,
@@ -2454,7 +3111,7 @@ const s = StyleSheet.create({
     marginTop: 2,
   },
   secondaryBannerWrap: {
-    marginHorizontal: 24,
+    marginHorizontal: DEALS_MARGIN,
     marginBottom: 28,
   },
   secondaryBannerCard: {
@@ -2480,6 +3137,52 @@ const s = StyleSheet.create({
     marginBottom: 8,
   },
   secondaryBannerImage: {
+    width: "40%",
+    height: "100%",
+    position: "absolute",
+    right: 0,
+    bottom: 0,
+  },
+  offerCard: {
+    width: Dimensions.get("window").width - DEALS_MARGIN * 2,
+    height: 140,
+    borderRadius: 20,
+    overflow: "hidden",
+    flexDirection: "row",
+    position: "relative",
+    borderWidth: 1,
+    borderColor: "rgba(120,90,50,0.08)",
+  },
+  offerTextArea: {
+    flex: 1,
+    maxWidth: "62%",
+    padding: 18,
+    justifyContent: "center",
+    zIndex: 2,
+  },
+  offerBadge: {
+    backgroundColor: "rgba(90,65,30,0.08)",
+    alignSelf: "flex-start",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    marginBottom: 10,
+  },
+  offerBadgeText: {
+    color: "#6B5A43",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  offerTitle: {
+    color: "#3B2F22",
+    fontSize: 17,
+    fontWeight: "800",
+    letterSpacing: -0.2,
+    lineHeight: 21,
+    marginBottom: 8,
+  },
+  offerImage: {
     width: "40%",
     height: "100%",
     position: "absolute",

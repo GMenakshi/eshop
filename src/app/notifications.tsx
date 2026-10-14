@@ -2,10 +2,12 @@ import { formatDistanceToNow } from "date-fns";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  PanResponder,
   Modal,
   Pressable,
   RefreshControl,
@@ -23,11 +25,31 @@ import { useAuth } from "@/context/auth-context";
 import { API_BASE_URL, apiImageUrl } from "@/lib/api";
 import {
   AppNotification,
+  clearAllNotifications,
+  deleteNotification,
   fetchNotifications,
   filterNotificationsForStore,
   markRead,
+  notificationOrderId,
 } from "@/lib/notifications-api";
 import { useStore } from "@/lib/store-context";
+import { useBanner, type BannerKind } from "@/components/top-banner";
+
+const bannerKindFor = (type: AppNotification["type"]): BannerKind => {
+  switch (type) {
+    case "ORDER_CANCELLED":
+      return "error";
+    case "ORDER_DELIVERED":
+    case "ORDER_CONFIRMED":
+    case "ORDER_PLACED":
+    case "NEW_ORDER":
+      return "success";
+    case "PRICE_QUOTED":
+      return "warning";
+    default:
+      return "info";
+  }
+};
 
 const iconFor = (type: AppNotification["type"]) => {
   switch (type) {
@@ -57,6 +79,12 @@ const iconFor = (type: AppNotification["type"]) => {
         android: "cancel",
         web: "cancel",
       } as const;
+    case "PRICE_QUOTED":
+      return {
+        ios: "tag.fill",
+        android: "sell",
+        web: "sell",
+      } as const;
     default:
       return {
         ios: "bell.fill",
@@ -65,6 +93,71 @@ const iconFor = (type: AppNotification["type"]) => {
       } as const;
   }
 };
+
+function SwipeToDelete({ onDelete, children }: { onDelete: () => void; children: React.ReactNode }) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const widthRef = useRef(300);
+  const onDeleteRef = useRef(onDelete);
+  onDeleteRef.current = onDelete;
+
+  const springBack = () =>
+    Animated.spring(translateX, { toValue: 0, useNativeDriver: true, bounciness: 4 }).start();
+
+  const pan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
+      onPanResponderMove: (_, g) => {
+        if (g.dx < 0) translateX.setValue(g.dx);
+      },
+      onPanResponderRelease: (_, g) => {
+        if (g.dx < -100 || g.vx < -0.8) {
+          Animated.timing(translateX, {
+            toValue: -widthRef.current,
+            duration: 200,
+            useNativeDriver: true,
+          }).start(() => onDeleteRef.current());
+        } else {
+          springBack();
+        }
+      },
+      onPanResponderTerminate: springBack,
+    }),
+  ).current;
+
+  const bgOpacity = translateX.interpolate({
+    inputRange: [-120, -20, 0],
+    outputRange: [1, 0.6, 0],
+    extrapolate: "clamp",
+  });
+
+  return (
+    <View onLayout={(e) => (widthRef.current = e.nativeEvent.layout.width)}>
+      <Animated.View style={[styles.swipeBg, { opacity: bgOpacity }]}>
+        <SymbolView
+          name={{ ios: "trash.fill", android: "delete", web: "delete" }}
+          size={22}
+          tintColor="#FFFFFF"
+        />
+      </Animated.View>
+      <Animated.View style={{ transform: [{ translateX }] }} {...pan.panHandlers}>
+        {children}
+      </Animated.View>
+    </View>
+  );
+}
+
+function FadeInView({ index, children }: { index: number; children: React.ReactNode }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(12)).current;
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(opacity, { toValue: 1, duration: 400, delay: Math.min(index, 8) * 70, useNativeDriver: true }),
+      Animated.timing(translateY, { toValue: 0, duration: 400, delay: Math.min(index, 8) * 70, useNativeDriver: true }),
+    ]).start();
+  }, []);
+  return <Animated.View style={{ opacity, transform: [{ translateY }] }}>{children}</Animated.View>;
+}
 
 export default function NotificationsScreen() {
   const { token } = useAuth();
@@ -87,7 +180,10 @@ export default function NotificationsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [orderImages, setOrderImages] = useState<Record<string, string>>({});
-
+  const [orderNames, setOrderNames] = useState<Record<string, string>>({});
+  const [orderGallery, setOrderGallery] = useState<Record<string, string[]>>({});
+  const banner = useBanner();
+  
   useEffect(() => {
     if (!token) return;
     let active = true;
@@ -98,13 +194,29 @@ export default function NotificationsScreen() {
       .then((json) => {
         if (!active) return;
         const map: Record<string, string> = {};
+        const names: Record<string, string> = {};
+        const gallery: Record<string, string[]> = {};
         for (const o of json?.orders ?? []) {
+          const all: string[] = [];
+          for (const it of o?.items ?? []) {
+            if (Array.isArray(it?.images)) all.push(...it.images);
+            if (typeof it?.image === "string") all.push(it.image);
+          }
+          const unique = Array.from(new Set(all.filter(Boolean)));
+          if (o?._id && unique.length > 1) gallery[String(o._id)] = unique;
           const img = o?.items?.[0]?.image;
           if (o?._id && typeof img === "string" && img) {
             map[String(o._id)] = img;
           }
+          const first = o?.items?.[0]?.name;
+          if (o?._id && typeof first === "string" && first) {
+            const extra = (o.items?.length ?? 1) - 1;
+            names[String(o._id)] = extra > 0 ? `${first} +${extra} more` : first;
+          }
         }
         setOrderImages(map);
+        setOrderNames(names);
+        setOrderGallery(gallery);
       })
       .catch(() => undefined);
     return () => {
@@ -117,6 +229,18 @@ export default function NotificationsScreen() {
     const id = typeof raw === "object" && raw ? raw._id : raw;
     const img = id ? orderImages[String(id)] : undefined;
     return img ? apiImageUrl(img) : undefined;
+  };
+
+  const notifGallery = (n: AppNotification) => {
+    const raw: any = (n as any).orderId;
+    const id = typeof raw === "object" && raw ? raw._id : raw;
+    return id ? (orderGallery[String(id)] ?? []) : [];
+  };
+
+  const notifName = (n: AppNotification) => {
+    const raw: any = (n as any).orderId;
+    const id = typeof raw === "object" && raw ? raw._id : raw;
+    return id ? orderNames[String(id)] : undefined;
   };
 
   const load = useCallback(
@@ -160,9 +284,9 @@ export default function NotificationsScreen() {
       setUnread((u) => Math.max(0, u - 1));
       void markRead(token, [n._id], activeStoreId);
     }
-    if (n.orderId) {
-      router.push("/orders");
-    }
+    const orderId = notificationOrderId(n);
+    if (orderId)
+      router.push({ pathname: "/order/[id]", params: { id: orderId } });
   };
 
   const markAll = async () => {
@@ -171,6 +295,25 @@ export default function NotificationsScreen() {
     setItems((prev) => prev.map((x) => ({ ...x, isRead: true })));
     setUnread(0);
     await markRead(token, undefined, activeStoreId);
+  };
+
+  const deleteOne = async (n: AppNotification) => {
+    if (!token) return;
+    const previous = items;
+    const previousUnread = unread;
+    setItems((prev) => prev.filter((x) => x._id !== n._id));
+    if (!n.isRead) setUnread((u) => Math.max(0, u - 1));
+    try {
+      await deleteNotification(token, n._id);
+    } catch (e) {
+      setItems(previous);
+      setUnread(previousUnread);
+      banner.show({
+        kind: "error",
+        title: "Could not delete notification",
+        message: e instanceof Error ? e.message : "Please try again.",
+      });
+    }
   };
 
   const clearAll = () => {
@@ -192,21 +335,15 @@ export default function NotificationsScreen() {
             setPage(1);
             setTotalPages(1);
             try {
-              const storeQuery = activeStoreId
-                ? `?storeId=${encodeURIComponent(activeStoreId)}`
-                : "";
-              const res = await fetch(
-                `${API_BASE_URL}/notification/clear-all${storeQuery}`,
-                {
-                  method: "DELETE",
-                  headers: { "x-access-token": token },
-                },
-              );
-              if (!res.ok) throw new Error("Request failed");
-            } catch {
+              await clearAllNotifications(token, activeStoreId);
+            } catch (e) {
               setItems(previous);
               setUnread(previousUnread);
-              Alert.alert("Could not clear notifications", "Please try again.");
+              banner.show({
+                kind: "error",
+                title: "Could not clear notifications",
+                message: e instanceof Error ? e.message : "Please try again.",
+              });
             }
           },
         },
@@ -249,7 +386,7 @@ export default function NotificationsScreen() {
               />
             </Pressable>
           </View>
-          {loaded && (
+          {token && loaded && (
             <ThemedText
               style={{ color: "#6E786F", fontSize: 13, marginBottom: 6 }}
             >
@@ -258,14 +395,33 @@ export default function NotificationsScreen() {
           )}
         </View>
 
-        {loading && <ActivityIndicator />}
-        {error && <ThemedText>{error}</ThemedText>}
-        {loaded && !error && items.length === 0 && (
+        {!token && (
+          <View style={styles.signInPanel}>
+            <ThemedText style={styles.panelTitle}>
+              Your notifications live here
+            </ThemedText>
+            <ThemedText style={styles.panelText}>
+              Sign in to see updates about your orders.
+            </ThemedText>
+            <Pressable
+              onPress={() => router.push("/sign-in")}
+              style={styles.primary}
+            >
+              <ThemedText style={styles.primaryText}>SIGN IN</ThemedText>
+            </Pressable>
+          </View>
+        )}
+
+        {token && loading && <ActivityIndicator />}
+        {token && error && <ThemedText>{error}</ThemedText>}
+        {token && loaded && !error && items.length === 0 && (
           <ThemedText>No notifications yet.</ThemedText>
         )}
 
-        {items.map((n) => (
-          <Pressable key={n._id} style={styles.card} onPress={() => onTap(n)}>
+        {items.map((n, idx) => (
+          <FadeInView key={n._id} index={idx}>
+          <SwipeToDelete onDelete={() => void deleteOne(n)}>
+          <Pressable style={styles.card} onPress={() => onTap(n)}>
             <View style={styles.iconWrap}>
               {notifImage(n) ? (
                 <Image
@@ -286,6 +442,28 @@ export default function NotificationsScreen() {
                 {n.title}
               </ThemedText>
               <ThemedText style={styles.notificationBody}>{n.body}</ThemedText>
+              {!!notifName(n) && (
+                <ThemedText
+                  style={[styles.notificationBody, { fontWeight: "700" }]}
+                  numberOfLines={1}
+                >
+                  {notifName(n)}
+                </ThemedText>
+              )}
+              {notifGallery(n).length > 1 && (
+                <View style={styles.galleryRow}>
+                  {notifGallery(n).slice(0, 4).map((img, i, arr) => (
+                    <View key={img + i} style={styles.galleryThumbWrap}>
+                      <Image source={{ uri: apiImageUrl(img) }} style={styles.galleryThumb} contentFit="cover" transition={300} />
+                      {i === 3 && notifGallery(n).length > 4 && (
+                        <View style={styles.galleryMore}>
+                          <ThemedText style={styles.galleryMoreText}>+{notifGallery(n).length - 4}</ThemedText>
+                        </View>
+                      )}
+                    </View>
+                  ))}
+                </View>
+              )}
               <ThemedText style={styles.notificationTime}>
                 {formatDistanceToNow(new Date(n.createdAt), {
                   addSuffix: true,
@@ -293,7 +471,10 @@ export default function NotificationsScreen() {
               </ThemedText>
             </View>
             {!n.isRead && <View style={styles.dot} />}
+
           </Pressable>
+          </SwipeToDelete>
+          </FadeInView>
         ))}
 
         {page < totalPages && (
@@ -342,7 +523,7 @@ export default function NotificationsScreen() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#F4F4ED" },
+  safeArea: { flex: 1, backgroundColor: "#FDF1E6" },
   content: { padding: 16, paddingBottom: 40 },
   header: {
     marginBottom: 20,
@@ -358,7 +539,7 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#E0E4DC",
+    borderColor: "#F3DFCB",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -370,7 +551,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingVertical: 6,
     borderWidth: 1,
-    borderColor: "#E0E4DC",
+    borderColor: "#F3DFCB",
     shadowColor: "#000",
     shadowOpacity: 0.12,
     shadowRadius: 12,
@@ -398,19 +579,36 @@ const styles = StyleSheet.create({
     padding: 10,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: "#E0E4DC",
+    borderColor: "#F3DFCB",
     position: "relative",
   },
   iconWrap: {
     width: 40,
     height: 40,
     borderRadius: 10,
-    backgroundColor: "#E8EFE7",
+    backgroundColor: "#FBE3CC",
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
   },
   thumb: { width: "100%", height: "100%" },
+  swipeBg: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 8,
+    borderRadius: 12,
+    backgroundColor: "#D5684A",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    paddingRight: 24,
+  },
+  galleryRow: { flexDirection: "row", gap: 6, marginTop: 8 },
+  galleryThumbWrap: { width: 44, height: 44, borderRadius: 10, overflow: "hidden", backgroundColor: "#FBE3CC", borderWidth: 1, borderColor: "#F3DFCB" },
+  galleryThumb: { width: "100%", height: "100%" },
+  galleryMore: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center" },
+  galleryMoreText: { color: "#fff", fontSize: 12, fontWeight: "800" },
   body: { flex: 1 },
   notificationTitle: {
     color: "#17211D",
@@ -428,13 +626,42 @@ const styles = StyleSheet.create({
     fontSize: 10,
     marginTop: 4,
   },
+  deleteBtn: {
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   dot: {
     position: "absolute",
     top: 10,
-    right: 10,
+    right: 12,
     width: 8,
     height: 8,
     borderRadius: 4,
     backgroundColor: "#D5684A",
   },
+  signInPanel: {
+  backgroundColor: "#FFFFFF",
+  borderRadius: 16,
+  padding: 20,
+  borderWidth: 1,
+  borderColor: "#F3DFCB",
+},
+panelTitle: { color: "#17211D", fontSize: 18, fontWeight: "800" },
+panelText: { color: "#6E786F", fontSize: 14, lineHeight: 21, marginTop: 7 },
+primary: {
+  backgroundColor: "rgba(245, 185, 121, 1)",
+  height: 48,
+  borderRadius: 24,
+  alignItems: "center",
+  justifyContent: "center",
+  marginTop: 16,
+},
+primaryText: {
+  color: "#FFFFFF",
+  fontSize: 11,
+  letterSpacing: 2,
+  fontWeight: "900",
+},
 });

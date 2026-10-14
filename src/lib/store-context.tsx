@@ -1,3 +1,5 @@
+import { api } from "@/lib/api";
+import { resolveInstallStore } from "@/lib/install-claim";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   createContext,
@@ -7,8 +9,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-
-import { api } from "@/lib/api";
 
 export type SavedStore = {
   id: string;
@@ -30,6 +30,8 @@ type StoreContextValue = {
   storeId: string | null;
   activeStore: SavedStore | null;
   ready: boolean;
+  storeUnavailable: boolean;
+  setStoreUnavailable: (v: boolean) => void;
   joinStore: (id: string) => Promise<boolean>;
   setStoreId: (id: string) => Promise<boolean>;
   switchStore: (id: string) => Promise<void>;
@@ -42,29 +44,75 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [stores, setStores] = useState<SavedStore[]>([]);
   const [storeId, setActiveId] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [storeUnavailable, setStoreUnavailable] = useState(false);
 
   useEffect(() => {
     (async () => {
+      let list: SavedStore[] = [];
+      let active: string | null = null;
       try {
         const [rawList, savedActive] = await Promise.all([
           AsyncStorage.getItem(STORES_KEY),
           AsyncStorage.getItem(ACTIVE_KEY),
         ]);
-        const list: SavedStore[] = rawList ? JSON.parse(rawList) : [];
-        setStores(list);
-        setActiveId(
+        list = rawList ? JSON.parse(rawList) : [];
+        active =
           savedActive && list.some((s) => s.id === savedActive)
             ? savedActive
-            : (list[0]?.id ?? null),
-        );
+            : (list[0]?.id ?? null);
       } catch {
-        setStores([]);
-        setActiveId(null);
-      } finally {
-        setReady(true);
+        list = [];
+        active = null;
       }
+
+      // First launch after install: claim the store from the install token
+      try {
+        const claimedId = await resolveInstallStore();
+        if (claimedId) {
+          const info = await api.storeInfo(claimedId);
+          if (info) {
+            const entry: SavedStore = {
+              id: info.id,
+              mongoId: info.mongoId,
+              name: info.name,
+              phone: info.phone,
+            };
+            list = [...list.filter((s) => s.id !== entry.id), entry];
+            active = entry.id;
+            await AsyncStorage.setItem(STORES_KEY, JSON.stringify(list));
+            await AsyncStorage.setItem(ACTIVE_KEY, entry.id);
+          }
+        }
+      } catch {
+        // ignore: the app still opens with the saved stores
+      }
+
+      setStores(list);
+      setActiveId(active);
+      setReady(true);
     })();
   }, []);
+
+  // Re-check the active store whenever it changes (and on app start)
+  useEffect(() => {
+    setStoreUnavailable(false);
+    if (!ready || !storeId) return;
+    let active = true;
+    api
+      .storeInfo(storeId)
+      .then((info) => {
+        if (!active) return;
+        if (!info || (info as any).isActive === false) {
+          setStoreUnavailable(true);
+        }
+      })
+      .catch(() => {
+        // network error: don't claim the store is gone
+      });
+    return () => {
+      active = false;
+    };
+  }, [ready, storeId]);
 
   const persist = async (list: SavedStore[], active: string | null) => {
     setStores(list);
@@ -84,7 +132,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         name: info.name,
         phone: info.phone,
       };
-      await persist([...stores.filter((s) => s.id !== entry.id), entry], entry.id);
+      await persist(
+        [...stores.filter((s) => s.id !== entry.id), entry],
+        entry.id,
+      );
       return true;
     },
     [stores],
@@ -114,6 +165,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         storeId,
         activeStore,
         ready,
+        storeUnavailable,
+        setStoreUnavailable,
         joinStore,
         setStoreId: joinStore,
         switchStore,

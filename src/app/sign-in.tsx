@@ -38,8 +38,12 @@ export default function SignInScreen() {
     setLoading(true);
     try {
       await signIn(email.trim(), password);
-      router.replace("/");
-    } catch (error) {
+        if (router.canGoBack()) {
+          router.back(); // return to the screen that asked for login
+        } else {
+          router.replace("/"); // opened sign-in directly, so go home
+        }    
+      } catch (error) {
       Alert.alert(
         "Sign in failed",
         error instanceof Error ? error.message : "Please try again.",

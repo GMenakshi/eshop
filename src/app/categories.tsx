@@ -1,3 +1,5 @@
+import { useRouter } from "expo-router";
+import { SymbolView } from "expo-symbols";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -10,15 +12,13 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
-import { SymbolView } from "expo-symbols";
 
 import { ThemedText } from "@/components/themed-text";
+import { useAuth } from "@/context/auth-context";
+import { useCart } from "@/context/cart-context";
 import { api, apiImageUrl, ApiProduct } from "@/lib/api";
 import { useStore } from "@/lib/store-context";
-import { useCart } from "@/context/cart-context";
-import { useAuth } from "@/context/auth-context";
-
+import { usePincode } from "@/lib/use-pincode";
 type Category = {
   _id: string;
   name: string;
@@ -30,13 +30,25 @@ const categoryIconMap: Record<
   { ios: string; android: string; web: string }
 > = {
   All: { ios: "sparkles", android: "auto_awesome", web: "auto_awesome" },
-  Groceries: { ios: "cart.fill", android: "shopping_basket", web: "shopping_basket" },
-  Grocery: { ios: "cart.fill", android: "shopping_basket", web: "shopping_basket" },
+  Groceries: {
+    ios: "cart.fill",
+    android: "shopping_basket",
+    web: "shopping_basket",
+  },
+  Grocery: {
+    ios: "cart.fill",
+    android: "shopping_basket",
+    web: "shopping_basket",
+  },
   Electronics: { ios: "tv.fill", android: "tv", web: "tv" },
   Beauty: { ios: "sparkle", android: "brush", web: "brush" },
   Gifting: { ios: "gift.fill", android: "card_giftcard", web: "card_giftcard" },
   Fashion: { ios: "shirt.fill", android: "checkroom", web: "checkroom" },
-  Toys: { ios: "gamecontroller.fill", android: "sports_esports", web: "gamepad" },
+  Toys: {
+    ios: "gamecontroller.fill",
+    android: "sports_esports",
+    web: "gamepad",
+  },
   Books: { ios: "book.fill", android: "menu_book", web: "book" },
   Sports: { ios: "figure.run", android: "sports", web: "sports" },
   Home: { ios: "house.fill", android: "home", web: "home" },
@@ -55,6 +67,7 @@ export default function CategoriesScreen() {
   const { storeId } = useStore();
   const activeStoreId = storeId;
   const { token } = useAuth();
+  const pincode = usePincode();
   const { addItem, items: cartItems, changeQuantity } = useCart();
 
   const [categories, setCategories] = useState<Category[]>([]);
@@ -64,7 +77,7 @@ export default function CategoriesScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [saved, setSaved] = useState<string[]>([]);
 
-    const loadData = async () => {
+  const loadData = async () => {
     if (!storeId) {
       setLoading(false);
       setRefreshing(false);
@@ -73,7 +86,7 @@ export default function CategoriesScreen() {
     try {
       const [categoryRes, productRes] = await Promise.allSettled([
         api.categories(storeId),
-        api.allProducts(storeId),
+        api.allProducts(storeId, pincode),
       ]);
 
       if (categoryRes.status === "fulfilled" && categoryRes.value.categories) {
@@ -103,13 +116,15 @@ export default function CategoriesScreen() {
     setActiveCategoryId("all");
     setLoading(true);
     void loadData();
-  }, [storeId]);
+  }, [storeId, pincode]);
 
-  const activeCategoryObj = categories.find((cat) => cat._id === activeCategoryId);
+  const activeCategoryObj = categories.find(
+    (cat) => cat._id === activeCategoryId,
+  );
   const activeCategoryName =
     activeCategoryId === "all"
       ? "All Products"
-      : activeCategoryObj?.name ?? "Products";
+      : (activeCategoryObj?.name ?? "Products");
 
   const filteredProducts = products.filter((product) => {
     if (activeCategoryId === "all") return true;
@@ -150,7 +165,9 @@ export default function CategoriesScreen() {
       console.warn(error);
       Alert.alert(
         "Product Unavailable",
-        error instanceof Error ? error.message : "This product is not available right now.",
+        error instanceof Error
+          ? error.message
+          : "This product is not available right now.",
       );
     }
   };
@@ -172,7 +189,9 @@ export default function CategoriesScreen() {
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
       <View style={styles.header}>
-        <ThemedText style={styles.headerTitle}>Categories & Products</ThemedText>
+        <ThemedText style={styles.headerTitle}>
+          Categories & Products
+        </ThemedText>
       </View>
       <View style={styles.body}>
         {/* Left sidebar for API categories */}
@@ -190,21 +209,23 @@ export default function CategoriesScreen() {
                 style={[styles.sidebarRow, active && styles.sidebarRowActive]}
                 onPress={() => setActiveCategoryId(cat._id)}
               >
-                 <View style={[styles.iconWrap, active && styles.iconWrapActive]}>
-                   {cat.image && apiImageUrl(cat.image) ? (
-                     <Image
-                       source={{ uri: apiImageUrl(cat.image) }}
-                       style={styles.categoryIconImage}
-                       resizeMode="cover"
-                     />
-                   ) : (
-                     <SymbolView
-                       name={icon as any}
-                       size={20}
-                       tintColor={active ? "#17211D" : "#526057"}
-                     />
-                   )}
-                 </View>
+                <View
+                  style={[styles.iconWrap, active && styles.iconWrapActive]}
+                >
+                  {cat.image && apiImageUrl(cat.image) ? (
+                    <Image
+                      source={{ uri: apiImageUrl(cat.image) }}
+                      style={styles.categoryIconImage}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <SymbolView
+                      name={icon as any}
+                      size={20}
+                      tintColor={active ? "#17211D" : "#526057"}
+                    />
+                  )}
+                </View>
                 <ThemedText
                   style={[
                     styles.sidebarLabel,
@@ -301,23 +322,7 @@ export default function CategoriesScreen() {
                               />
                             </View>
                           )}
-                          <Pressable
-                            style={styles.saveButton}
-                            onPress={(e) => {
-                              e.stopPropagation();
-                              setSaved((items) =>
-                                isSaved
-                                  ? items.filter((i) => i !== product.title)
-                                  : [...items, product.title],
-                              );
-                            }}
-                          >
-                            <SymbolView
-                              name="heart"
-                              size={12}
-                              tintColor={isSaved ? "#D5684A" : "#17211D"}
-                            />
-                          </Pressable>
+
 
                           {cartItem ? (
                             <View style={styles.cartControls}>
@@ -382,7 +387,7 @@ export default function CategoriesScreen() {
                           >
                             {product.price > 0
                               ? `MRP ₹${product.price}`
-                              : "PRICE ON REQUEST"}
+                              : "CLICK ORDER FOR PRICE"}
                           </ThemedText>
                           {product.unit ? (
                             <ThemedText style={styles.productUnit}>
@@ -411,13 +416,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#E5E8E4",
+    borderBottomColor: "#FFE3D0",
     backgroundColor: "#FFFFFF",
   },
   headerTitle: {
     fontSize: 18,
     fontWeight: "800",
-    color: "#17211D",
+    color: "#1A1A1A",
   },
   body: { flex: 1, flexDirection: "row" },
 
@@ -426,9 +431,9 @@ const styles = StyleSheet.create({
     width: SIDEBAR_WIDTH,
     flexGrow: 0,
     flexShrink: 0,
-    backgroundColor: "#F4F4ED",
+    backgroundColor: "#FFF4EA",
     borderRightWidth: 1,
-    borderRightColor: "#E0E0D8",
+    borderRightColor: "#FFE3D0",
   },
   sidebarContent: { paddingBottom: 130 },
   sidebarRow: {
@@ -439,24 +444,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
     gap: 6,
     borderBottomWidth: 1,
-    borderBottomColor: "#E8E8E0",
+    borderBottomColor: "#FFE3D0",
     borderLeftWidth: 3,
     borderLeftColor: "transparent",
   },
   sidebarRowActive: {
     backgroundColor: "#FFFFFF",
-    borderLeftColor: "#17211D",
+    borderLeftColor: "#F09148",
   },
   iconWrap: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: "#E4ECE4",
+    backgroundColor: "#FFF1E6",
     alignItems: "center",
     justifyContent: "center",
   },
   iconWrapActive: {
-    backgroundColor: "#D8E5D8",
+    backgroundColor: "#FFD9BC",
   },
   categoryIconImage: {
     width: 32,
@@ -471,7 +476,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   sidebarLabelActive: {
-    color: "#17211D",
+    color: "#E8763A",
     fontWeight: "800",
   },
 
@@ -483,7 +488,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 14,
     paddingVertical: 10,
-    backgroundColor: "#F9FAF8",
+    backgroundColor: "#FFFAF5",
     borderBottomWidth: 1,
     borderBottomColor: "#E5E8E4",
   },
@@ -541,7 +546,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#E9ECE8",
+    backgroundColor: "#FFF1E6",
   },
   saveButton: {
     position: "absolute",

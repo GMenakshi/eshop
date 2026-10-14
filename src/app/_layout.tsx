@@ -1,4 +1,6 @@
 import { AppAlertHost } from "@/components/app-alert";
+import { StoreUnavailable } from "@/components/store-unavailable";
+import { VisitTracker } from "@/components/visit-tracker";
 import { AuthProvider, useAuth } from "@/context/auth-context";
 import { CartProvider } from "@/context/cart-context";
 import { WishlistProvider } from "@/context/wishlist-context";
@@ -12,6 +14,8 @@ import { DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { Platform } from "react-native";
+import { BannerProvider } from "@/components/top-banner";
+import { useBanner } from "@/components/top-banner";
 
 SplashScreen.preventAutoHideAsync();
 
@@ -23,7 +27,16 @@ const AppTheme = {
   },
 };
 
+// Screens that need a working store. Everything else keeps working.
+const STORE_SCREENS = new Set([
+  "product/[id]",
+  "checkout",
+  "wishlist",
+  "reviews",
+]);
+
 function PushBootstrap() {
+  const banner = useBanner();
   const { token } = useAuth();
   const { activeStore, storeId, ready: storesReady } = useStore();
   const router = useRouter();
@@ -76,6 +89,7 @@ function PushBootstrap() {
 
 function AppRoot() {
   const { ready } = useAuth();
+  const { storeUnavailable } = useStore();
 
   useEffect(() => {
     if (ready) SplashScreen.hideAsync();
@@ -86,12 +100,20 @@ function AppRoot() {
   return (
     <>
       <PushBootstrap />
+      <VisitTracker />
       <Stack
         initialRouteName="(tabs)"
         screenOptions={{
           headerShown: false,
           contentStyle: { backgroundColor: "transparent" },
         }}
+        screenLayout={({ route, children }) =>
+          storeUnavailable && STORE_SCREENS.has(route.name) ? (
+            <StoreUnavailable />
+          ) : (
+            children
+          )
+        }
       >
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="sign-in" />
@@ -114,7 +136,6 @@ function AppRoot() {
         <Stack.Screen name="notifications" />
         <Stack.Screen name="settings" />
       </Stack>
-      <AppAlertHost />
     </>
   );
 }
@@ -126,7 +147,10 @@ export default function RootLayout() {
         <StoreProvider>
           <WishlistProvider>
             <CartProvider>
-              <AppRoot />
+              <BannerProvider>
+                <AppRoot />
+                <AppAlertHost />
+              </BannerProvider>
             </CartProvider>
           </WishlistProvider>
         </StoreProvider>

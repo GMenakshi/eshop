@@ -20,6 +20,28 @@ class ApiRequestError extends Error {
 const storeProductsUrl = (storeId: string) =>
   `${API_BASE_URL}/product/store/${encodeURIComponent(storeId)}`;
 
+export type ApiDelivery = {
+  deliverable: boolean;
+  mode?: string;
+  distanceKm?: number | null;
+  minMinutes?: number | null;
+  maxMinutes?: number | null;
+  minDays?: number | null;
+  maxDays?: number | null;
+  estimatedMinDate?: string | null;
+  estimatedMaxDate?: string | null;
+  shippingCharge?: number | null;
+  shippingNote?: string | null;
+  freeDeliveryAbove?: number | null;
+  label?: string | null;
+};
+
+export type ApiGst = {
+cgst?: number | null;
+sgst?: number | null;
+igst?: number | null;
+};
+
 export type ApiAddress = {
   addressLine?: string;
   area?: string;
@@ -55,6 +77,7 @@ export type ApiSizeVariant = {
   currentStock?: number;
   stock?: number;
   sku?: string | null;
+  effectiveGst?: ApiGst;
   isActive?: boolean;
 };
 
@@ -70,7 +93,8 @@ export type ApiVariant = {
   sku?: string;
   isActive?: boolean;
   images?: string[];
-  sizeVariants?: ApiSizeVariant[]; // NEW — nested variants (e.g. Sofa-style color→size structure)
+  sizeVariants?: ApiSizeVariant[];
+effectiveGst?: ApiGst; // NEW — nested variants (e.g. Sofa-style color→size structure)
 };
 
 type ApiProductSource = Partial<{
@@ -101,6 +125,13 @@ type ApiProductSource = Partial<{
   deliveryTime: string;
   productCode: string;
   createdAt: string;
+  delivery: ApiDelivery | null;
+gst: ApiGst | null;
+gstInclusive: boolean;
+  priceOnRequest: boolean;
+  hasTierPricing: boolean;
+  minTierPrice: number | null;
+  priceTiers: { minQty: number; maxQty: number | null; price: number }[];
 }>;
 
 export type ApiProduct = {
@@ -127,6 +158,13 @@ export type ApiProduct = {
   colorVariantId?: string;
   variants?: ApiVariant[];
   rating?: number;
+  delivery?: ApiDelivery;
+  priceOnRequest?: boolean;
+gst?: ApiGst;
+gstInclusive?: boolean;
+  hasTierPricing?: boolean;
+  minTierPrice?: number | null;
+  priceTiers?: { minQty: number; maxQty: number | null; price: number }[];
 };
 
 const normalizeProduct = (
@@ -192,6 +230,13 @@ const normalizeProduct = (
     storeId: product.storeId,
     variantId,
     variants: product.variants,
+    delivery: product.delivery ?? undefined,
+    priceOnRequest: product.priceOnRequest,
+    hasTierPricing: product.hasTierPricing,
+    minTierPrice: product.minTierPrice,
+    priceTiers: product.priceTiers,
+gst: product.gst ?? undefined,
+gstInclusive: product.gstInclusive,
   };
 };
 
@@ -242,6 +287,35 @@ export type ApiCartResponse = {
   _id?: string;
 };
 
+
+
+type ProductListResponse = {
+  success?: boolean;
+  store?: { _id?: string; storeUniqueId?: string };
+  delivery?: ApiDelivery;
+  products: ApiProductSource[];
+  pagination?: { totalData?: number };
+  totalProducts?: number;
+};
+
+const mapProductList = (response: ProductListResponse) => ({
+  ...response,
+  products: (response.products ?? [])
+    .map((p) => normalizeProduct(p))
+    .filter((p): p is ApiProduct => Boolean(p)),
+  pagination: {
+    ...(response.pagination ?? {}),
+    totalData: response.pagination?.totalData ?? response.totalProducts ?? 0,
+  },
+});
+
+const withQuery = (params: Record<string, string | undefined>) => {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => v && q.set(k, v));
+  const s = q.toString();
+  return s ? `?${s}` : "";
+};
+
 export const apiImageUrl = (image?: string) => {
   if (!image) return undefined;
   if (image.startsWith("http")) return image;
@@ -283,7 +357,7 @@ async function request<T>(
     });
   }
   if (!response.ok) {
-    console.error("[API] Request failed", {
+    (response.status === 404 ? console.warn : console.error)("[API] Request failed", {
       method: options.method ?? "GET",
       url: finalUrl,
       status: response.status,
@@ -461,14 +535,15 @@ export const api = {
       return null;
     }
   },
-  products: async (storeId: string, page = 1) => {
+  products: async (storeId: string, page = 1, pincode?: string) => {
     const response = await request<{
       store?: { _id?: string; storeUniqueId?: string };
+      delivery?: ApiDelivery;
       products: ApiProductSource[];
       pagination?: { totalData?: number };
       totalProducts?: number;
     }>(
-      `${page > 1 ? `?page=${page}` : ""}`,
+      withQuery({ page: page > 1 ? String(page) : undefined, pincode }),
       {},
       `${storeProductsUrl(storeId)}/products`,
     );
@@ -485,26 +560,30 @@ export const api = {
       },
     };
   },
-  allProducts: async (storeId: string) => {
-    const firstPage = await api.products(storeId);
+  allProducts: async (storeId: string, pincode?: string) => {
+    const firstPage = await api.products(storeId, 1, pincode);
     const pageSize = Math.max(firstPage.products.length, 1);
     const totalPages = Math.ceil(
       (firstPage.pagination?.totalData ?? pageSize) / pageSize,
     );
     const remaining = await Promise.all(
       Array.from({ length: Math.max(totalPages - 1, 0) }, (_, index) =>
-        api.products(storeId, index + 2),
+        api.products(storeId, index + 2, pincode),
       ),
     );
     return [firstPage, ...remaining].flatMap((response) => response.products);
   },
-  product: async (storeId: string, id: string) => {
+  product: async (storeId: string, id: string, pincode?: string) => {
     const response = await request<{
       store?: { products?: ApiProductSource[] };
       product?: ApiProductSource;
       data?: ApiProductSource;
       products?: ApiProductSource[];
-    }>(`/${id}`, {}, `${storeProductsUrl(storeId)}/products`);
+    }>(
+      `/${id}${withQuery({ pincode })}`,
+      {},
+      `${storeProductsUrl(storeId)}/products`,
+    );
 
     const products = response.products ?? response.store?.products ?? [];
     const selectedProduct =
@@ -518,14 +597,19 @@ export const api = {
       products,
     };
   },
-  productsByCategory: async (storeId: string, categoryId: string, page = 1) => {
+  productsByCategory: async (
+    storeId: string,
+    categoryId: string,
+    page = 1,
+    pincode?: string,
+  ) => {
     const response = await request<{
       category?: { _id: string; name: string };
       products: ApiProductSource[];
       pagination?: { totalData?: number };
       totalProducts?: number;
     }>(
-      `${page > 1 ? `?page=${page}` : ""}`,
+      withQuery({ page: page > 1 ? String(page) : undefined, pincode }),
       {},
       `${storeProductsUrl(storeId)}/categories/${encodeURIComponent(
         categoryId,
@@ -544,9 +628,15 @@ export const api = {
       },
     };
   },
-  searchProducts: async (storeId: string, title: string, page = 1) => {
+  searchProducts: async (
+    storeId: string,
+    title: string,
+    page = 1,
+    pincode?: string,
+  ) => {
     const params = new URLSearchParams({ search: title });
     if (page > 1) params.set("page", String(page));
+    if (pincode) params.set("pincode", pincode);
 
     const response = await request<{
       products: ApiProductSource[];
@@ -703,7 +793,7 @@ export const api = {
         country: string;
       };
       note?: string;
-      paymentMethod: "COD";
+      paymentMethod?: "COD" | "ONLINE";
     },
   ) => {
     const options = {
@@ -731,7 +821,7 @@ export const api = {
         country: string;
       };
       note?: string;
-      paymentMethod: string;
+      paymentMethod?: string;
     },
   ) => {
     return request<{
@@ -744,6 +834,82 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
+  deliveryCheck: (params: {
+    storeUniqueId: string;
+    pincode: string;
+    productId?: string;
+    variantId?: string;
+    quantity?: number;
+    itemsTotal?: number;
+  }) => {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(
+      ([k, v]) => v !== undefined && v !== "" && q.set(k, String(v)),
+    );
+    return request<{
+      success: boolean;
+      deliverable: boolean;
+      message: string | null;
+      delivery: ApiDelivery | null;
+    }>(`/delivery/check?${q.toString()}`);
+  },
+  checkoutPreview: (
+    token: string,
+    body: {
+      cartId?: string;
+      storeIds?: string[];
+      productId?: string;
+      variantId?: string;
+      quantity?: number;
+      paymentMethod?: "COD" | "ONLINE";
+      deliveryAddress: { pincode: string; state?: string; country?: string };
+    },
+  ) =>
+    request<{
+      success: boolean;
+      itemsTotal: number;
+      totalShipping: number;
+      grandTotal: number;
+      stores: {
+        storeId: string;
+        storeName: string | null;
+        ok: boolean;
+        message?: string;
+        shippingCharge: number;
+        delivery: ApiDelivery | null;
+      }[];
+    }>("/order/checkout-preview", {
+      method: "POST",
+      headers: { "x-access-token": token },
+      body: JSON.stringify(body),
+    }),
+  registerStoreVisit: (
+    token: string,
+    store: { storeUniqueId?: string; storeId?: string },
+  ) =>
+    request<{ success: boolean; message: string }>("/store-visit", {
+      method: "POST",
+      headers: { "x-access-token": token },
+      body: JSON.stringify(store),
+    }),
+  initiatePayment: (token: string, orderId: string) =>
+    request<{
+      success: boolean;
+      message: string;
+      paymentUrl: string;
+      payuParams: Record<string, string>;
+    }>(`/payment/initiate/${encodeURIComponent(orderId)}`, {
+      method: "POST",
+      headers: { "x-access-token": token },
+      body: JSON.stringify({}),
+    }),
+  verifyPayment: (token: string, orderId: string) =>
+    request<{
+      success?: boolean;
+      order: { _id: string; paymentStatus: string; totalAmount?: number };
+    }>(`/payment/verify/${encodeURIComponent(orderId)}`, {
+      headers: { "x-access-token": token },
+    }),
   clearCart: (token: string) =>
     request("/cart", {
       method: "DELETE",
@@ -758,7 +924,12 @@ export const api = {
     }>("/order/my-orders", {
       headers: { "x-access-token": token },
     }),
-  cancelOrder: (token: string, orderId: string, reason?: string) =>
+  cancelOrder: (
+    token: string,
+    orderId: string,
+    reason?: string,
+    line?: { itemId?: string; productId?: string },
+  ) =>
     request<{
       success: boolean;
       message: string;
@@ -766,8 +937,21 @@ export const api = {
     }>(`/order/my-orders/${encodeURIComponent(orderId)}/cancel`, {
       method: "PATCH",
       headers: { "x-access-token": token },
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({
+        reason,
+        ...(line?.itemId ? { itemId: line.itemId } : {}),
+        ...(line?.productId ? { productId: line.productId } : {}),
+      }),
     }),
+  respondToQuote: (token: string, orderId: string, accepted: boolean) =>
+    request<{ success: boolean; message: string; order?: unknown }>(
+      `/order/my-orders/${encodeURIComponent(orderId)}/quote`,
+      {
+        method: "PATCH",
+        headers: { "x-access-token": token },
+        body: JSON.stringify({ action: accepted ? "ACCEPT" : "REJECT" }),
+      },
+    ),
 };
 
 export { API_BASE_URL };

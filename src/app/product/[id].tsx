@@ -1,6 +1,30 @@
+import { ImageViewer } from "@/components/image-viewer";
 import { ProductRail } from "@/components/product-rail";
+import { ThemedText } from "@/components/themed-text";
+import { useAuth } from "@/context/auth-context";
+import { useCart } from "@/context/cart-context";
+import { useWishlist } from "@/context/wishlist-context";
+import {
+  API_BASE_URL,
+  api,
+  apiImageUrl,
+  type ApiDelivery,
+  type ApiProduct,
+  type ApiVariant,
+} from "@/lib/api";
+import { formatDeliveryDate } from "@/lib/delivery";
+import { goBackOrHome } from "@/lib/navigation";
+import { getPriceTiers } from "@/lib/price-tiers";
+import { gstBreakup, gstRate, pickGst } from "@/lib/gst";
+import { addRecentlyViewed, getRecentlyViewedIds } from "@/lib/recently-viewed";
+import { useStore } from "@/lib/store-context";
+import { usePincode } from "@/lib/use-pincode";
+import { deliveryDateText, shippingChargeText } from "@/lib/delivery-text";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
+import { LinearGradient } from "expo-linear-gradient";
+import { BlurView } from "expo-blur";
+import { getColors } from "react-native-image-colors";
 import { router, useLocalSearchParams } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { VideoView, useVideoPlayer } from "expo-video";
@@ -16,6 +40,7 @@ import {
   Share,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import {
@@ -23,26 +48,20 @@ import {
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
 
-import { ThemedText } from "@/components/themed-text";
-import { useAuth } from "@/context/auth-context";
-import { useCart } from "@/context/cart-context";
-import { useWishlist } from "@/context/wishlist-context";
-import {
-  API_BASE_URL,
-  api,
-  apiImageUrl,
-  type ApiProduct,
-  type ApiVariant,
-} from "@/lib/api";
-import { goBackOrHome } from "@/lib/navigation";
-import { addRecentlyViewed, getRecentlyViewedIds } from "@/lib/recently-viewed";
-import { useStore } from "@/lib/store-context";
-
 const ink = "#1A1A1A";
 const muted = "#999999";
 const accent = "#E8634A";
 const bgLight = "#F8F6F3";
 const screenWidth = Dimensions.get("window").width;
+const GLASS_H = 190; // height of the frosted zone at the top of the card
+
+const withAlpha = (hex: string, a: number) => {
+  const h = hex.replace("#", "");
+  const full = h.length === 3 ? h.split("").map((x) => x + x).join("") : h.slice(0, 6);
+  const n = parseInt(full, 16);
+  if (Number.isNaN(n)) return `rgba(245,185,121,${a})`;
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+};
 
 const cleanDescription = (description?: string) =>
   description?.replace(/<[^>]+>/g, "").trim() ||
@@ -111,7 +130,7 @@ const getVariantLabel = (variant: ApiVariant) => {
 const getSimilarDiscount = (entry: ApiProduct) => {
   const original = entry.originalPrice;
   const price = entry.price;
-  if (typeof original === "number" && original > price) {
+  if (price > 0 && typeof original === "number" && original > price) {
     return Math.round(((original - price) / original) * 100);
   }
   return null;
@@ -191,26 +210,40 @@ export default function ProductViewScreen() {
   const [deliveryExpanded, setDeliveryExpanded] = useState(true);
   const { addItem, items: cartItems } = useCart();
   const { storeId, activeStore } = useStore();
+  const pincode = usePincode();
   const { toggle, isSaved } = useWishlist();
   const [product, setProduct] = useState<ApiProduct | null>(null);
   const [selectedVariantIndex, setSelectedVariantIndex] = useState(0);
   const [similar, setSimilar] = useState<ApiProduct[]>([]);
   const [quantity, setQuantity] = useState(1);
+  const [qtyText, setQtyText] = useState("1");
+  // keep the box in step when + / − or a tier chip changes the quantity
+  useEffect(() => {
+    setQtyText(String(quantity));
+  }, [quantity]);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [showCartToast, setShowCartToast] = useState(false);
   const [cartBounce] = useState(() => new Animated.Value(1));
   const cartToastAnim = useRef(new Animated.Value(0)).current;
   const [scrollX] = useState(() => new Animated.Value(0));
+  const scrollY = useRef(new Animated.Value(0)).current;
   const [reviews, setReviews] = useState<ReviewView[]>([]);
   const [ratingStats, setRatingStats] = useState({ average: 0, total: 0 });
   const [forYou, setForYou] = useState<ApiProduct[]>([]);
   const [galleryIndex, setGalleryIndex] = useState(0);
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
   const [descExpanded, setDescExpanded] = useState(false);
   const [selectedColorIndex, setSelectedColorIndex] = useState(0);
   const [detailsExpanded, setDetailsExpanded] = useState(true);
+  const [benefitsOpen, setBenefitsOpen] = useState(false);
   const galleryRef = useRef<ScrollView>(null);
   const [recentIds, setRecentIds] = useState<string[]>([]);
+  const [deliveryCheck, setDeliveryCheck] = useState<{
+    deliverable: boolean;
+    message: string | null;
+    delivery: ApiDelivery | null;
+  } | null>(null);
   // If the product has color variants, ALWAYS use the selected color's images
   // (never fall back to product.images when variants exist).
   // Only use product.images / product.image when there are NO variants at all.
@@ -256,21 +289,54 @@ export default function ProductViewScreen() {
     uri,
   }));
 
+  const imageItems = mediaItems.filter((m) => m.type === "image");
+  const viewerImages = imageItems.map((m) => apiImageUrl(m.uri) ?? m.uri);
+
+  const [tint, setTint] = useState("#F5B979");
+  const heroUri = (() => {
+    const m = mediaItems[galleryIndex];
+    const u = m?.type === "image" ? m.uri : imageItems[0]?.uri;
+    return u ? apiImageUrl(u) : undefined;
+  })();
+
+  useEffect(() => {
+    if (!heroUri) return;
+    let active = true;
+    getColors(heroUri, {
+      fallback: "#F5B979",
+      cache: true,
+      key: heroUri,
+      quality: "low",
+    })
+      .then((c: any) => {
+        if (!active) return;
+        const col =
+          c.platform === "ios"
+            ? (c.background ?? c.primary)
+            : (c.vibrant ?? c.dominant ?? c.average);
+        if (col) setTint(col);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [heroUri]);
+
   useEffect(() => {
     if (!id || !storeId) return;
     let active = true;
     api
-      .product(storeId, id)
+      .product(storeId, id, pincode)
       .then(async (response) => {
         let selected = response.product ?? response.data;
         let allProducts: ApiProduct[] = [];
         if (!selected) {
-          const list = await api.products(storeId);
+          const list = await api.products(storeId, 1, pincode);
           allProducts = list.products;
           selected = allProducts.find((entry) => entry._id === id);
         }
         if (!allProducts.length)
-          allProducts = (await api.products(storeId)).products;
+          allProducts = (await api.products(storeId, 1, pincode)).products;
         if (active) {
           setProduct(selected ?? null);
           setSelectedVariantIndex(0);
@@ -299,13 +365,13 @@ export default function ProductViewScreen() {
     return () => {
       active = false;
     };
-  }, [id, storeId]);
+  }, [id, storeId, pincode]);
 
   useEffect(() => {
     if (!storeId) return;
     let active = true;
     api
-      .allProducts(storeId)
+      .allProducts(storeId, pincode)
       .then((catalog) => {
         if (active) setForYou(catalog);
       })
@@ -313,7 +379,7 @@ export default function ProductViewScreen() {
     return () => {
       active = false;
     };
-  }, [storeId]);
+  }, [storeId, pincode]);
 
   useEffect(() => {
     if (!id) return;
@@ -354,7 +420,7 @@ export default function ProductViewScreen() {
     return () => {
       active = false;
     };
-  }, [id, storeId]);
+  }, [id, storeId, pincode]);
 
   useEffect(() => {
     if (!showCartToast) {
@@ -381,6 +447,31 @@ export default function ProductViewScreen() {
     ]).start(() => setShowCartToast(false));
   }, [showCartToast, cartToastAnim]);
 
+  // If the single-product API drops priceTiers, read them from the list API
+  useEffect(() => {
+    if (!product || !storeId) return;
+    const existing = (product as any).priceTiers;
+    if (Array.isArray(existing) && existing.length > 0) return;
+    let active = true;
+    fetch(
+      `${API_BASE_URL}/product/store/${encodeURIComponent(storeId)}/products`,
+    )
+      .then((r) => r.json())
+      .then((json) => {
+        const match = (json?.products ?? []).find(
+          (p: any) => p._id === product._id,
+        );
+        if (active && match?.priceTiers?.length) {
+          setProduct((prev) =>
+            prev ? ({ ...prev, priceTiers: match.priceTiers } as any) : prev,
+          );
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [product?._id, storeId]);
 
   const recentProducts = recentIds
     .map((rid) => forYou.find((p) => p._id === rid))
@@ -396,12 +487,55 @@ export default function ProductViewScreen() {
   const sizeVariants = selectedColorVariant?.sizeVariants ?? [];
   const selectedVariant = sizeVariants[selectedVariantIndex] ?? sizeVariants[0];
 
-  const currentPrice = selectedVariant?.offerPrice ?? product?.price ?? 0;
+  // quantity-based price tiers, e.g. 1-82 pcs = ₹X, 83-110 pcs = ₹Y
+  const priceTiers = getPriceTiers(
+    selectedVariant,
+    selectedColorVariant,
+    product,
+  );
+  const hasTiers = priceTiers.length > 0;
+  useEffect(() => {
+    if (product && priceTiers.length === 0) {
+      console.log(
+        "NO TIERS FOUND. product =",
+        JSON.stringify(product).slice(0, 2500),
+      );
+    }
+  }, [product]);
+  // highest tier whose minimum you've reached; past the last max it stays on the last tier
+  const activeTierIndex = hasTiers
+    ? Math.max(
+        0,
+        priceTiers.reduce(
+          (found, t, i) => (quantity >= t.minQty ? i : found),
+          0,
+        ),
+      )
+    : -1;
+  const tierLabel = (t: { minQty: number; maxQty: number | null }) =>
+    t.maxQty == null ? `${t.minQty}+` : `${t.minQty} - ${t.maxQty}`;
+  const unitLabel = product?.unit ? String(product.unit) : "pcs";
+
+  const currentPrice = hasTiers
+    ? priceTiers[activeTierIndex].price
+    : (selectedVariant?.offerPrice ?? product?.price ?? 0);
+  const totalPrice = currentPrice * quantity;
+  const priceOnRequest = !(currentPrice > 0);
+  const taxGst = pickGst(
+    selectedVariant?.effectiveGst,
+    selectedColorVariant?.effectiveGst,
+    product?.gst,
+  );
+  const taxRate = gstRate(taxGst);
+  const gstInclusive = Boolean(product?.gstInclusive);
+  const taxInfo = gstBreakup(currentPrice, quantity, taxRate, gstInclusive);
   const currentOriginalPrice = selectedVariant?.mrp ?? product?.originalPrice;
   const currentSize = selectedVariant?.size || product?.size || "One Size";
   const currentWeight = selectedVariant?.weight || product?.weight || "N/A";
   const currentStock = selectedVariant?.currentStock;
   const hasDiscount =
+    !priceOnRequest &&
+    !hasTiers &&
     typeof currentOriginalPrice === "number" &&
     currentOriginalPrice > currentPrice;
   const discountPercent =
@@ -413,12 +547,75 @@ export default function ProductViewScreen() {
   const categoryLabel =
     product?.categoryName || product?.categoryId || "Collection";
 
+  const outOfStock = typeof currentStock === "number" && currentStock <= 0;
+  const notDeliverable = deliveryCheck
+    ? deliveryCheck.deliverable === false
+    : product?.delivery?.deliverable === false;
+  const liveDelivery = deliveryCheck?.delivery ?? product?.delivery;
+  const maxQty =
+    typeof currentStock === "number" && currentStock > 0
+      ? currentStock
+      : Number.POSITIVE_INFINITY;
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const tierBasePrice = hasTiers ? priceTiers[0].price : 0;
+  const referencePrice =
+    typeof currentOriginalPrice === "number" &&
+    currentOriginalPrice > currentPrice
+      ? currentOriginalPrice
+      : tierBasePrice > currentPrice
+        ? tierBasePrice
+        : 0;
+  const hasOffer = !priceOnRequest && referencePrice > currentPrice;
+  const totalOriginal = round2(referencePrice * quantity);
+  const totalSaved = hasOffer
+    ? round2((referencePrice - currentPrice) * quantity)
+    : 0;
+  const offerPercent = hasOffer
+    ? Math.round(((referencePrice - currentPrice) / referencePrice) * 100)
+    : 0;
+
+  useEffect(() => {
+    if (Number.isFinite(maxQty) && quantity > maxQty) setQuantity(maxQty);
+  }, [maxQty]);
+
   const currentVariantId =
     selectedVariant?._id ??
     selectedVariant?.id ??
     selectedColorVariant?._id ??
     selectedColorVariant?.id ??
     product?.variantId;
+  useEffect(() => {
+    if (!product?._id || !pincode || !storeId) {
+      setDeliveryCheck(null);
+      return;
+    }
+    let active = true;
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.deliveryCheck({
+          storeUniqueId: String(storeId),
+          pincode: String(pincode),
+          productId: product._id,
+          variantId: currentVariantId ? String(currentVariantId) : undefined,
+          quantity,
+          itemsTotal: Math.round(totalPrice * 100) / 100,
+        });
+        if (active && res.success)
+          setDeliveryCheck({
+            deliverable: res.deliverable,
+            message: res.message,
+            delivery: res.delivery,
+          });
+      } catch {
+        /* keep the list estimate */
+      }
+    }, 400);
+    return () => {
+      active = false;
+      clearTimeout(t);
+    };
+  }, [product?._id, currentVariantId, quantity, pincode, storeId, Math.round(totalPrice)]);
+
   const addedToCart = cartItems.some((item) => {
     if (item.id !== product?._id) return false;
     if (!currentVariantId) return true;
@@ -475,6 +672,21 @@ export default function ProductViewScreen() {
       router.push("/sign-in");
       return;
     }
+    if (notDeliverable) {
+      Alert.alert(
+        "Not deliverable",
+        "This product can't be delivered to your pincode.",
+      );
+      return;
+    }
+    if (outOfStock) {
+      Alert.alert("Out of stock", "This product is currently out of stock.");
+      return;
+    }
+    if (quantity > maxQty) {
+      Alert.alert("Limited stock", `Only ${currentStock} available.`);
+      return;
+    }
     setAdding(true);
     try {
       const variantId =
@@ -487,6 +699,9 @@ export default function ProductViewScreen() {
         selectedColorVariant?.images?.[0] ?? productImages[0] ?? product.image;
       const productToAdd = {
         ...product,
+        priceTiers,
+        gst: taxGst,
+        gstInclusive,
         variantId,
         color: selectedColorVariant?.color,
         colorVariantId: selectedColorVariant?._id ?? selectedColorVariant?.id,
@@ -513,38 +728,37 @@ export default function ProductViewScreen() {
     }
   };
 
-  const handleBuyNow = async () => {
+  const handleBuyNow = () => {
     if (!product) return;
     if (!token) {
       router.push("/sign-in");
       return;
     }
-    setAdding(true);
-    try {
-      const variantId =
-        selectedVariant?._id ??
-        selectedVariant?.id ??
-        selectedColorVariant?._id ??
-        selectedColorVariant?.id ??
-        product.variantId;
-      const productToAdd = {
-        ...product,
-        variantId,
-        price: currentPrice,
-        originalPrice: currentOriginalPrice,
-        size: currentSize,
-        weight: currentWeight,
-      };
-      await addItem(productToAdd, quantity);
-      router.push("/checkout");
-    } catch (error) {
+    if (notDeliverable) {
       Alert.alert(
-        "Could not add product",
-        error instanceof Error ? error.message : "Please try again.",
+        "Not deliverable",
+        "This product can't be delivered to your pincode.",
       );
-    } finally {
-      setAdding(false);
+      return;
     }
+    if (outOfStock) {
+      Alert.alert("Out of stock", "This product is currently out of stock.");
+      return;
+    }
+    if (quantity > maxQty) {
+      Alert.alert("Limited stock", `Only ${currentStock} available.`);
+      return;
+    }
+    router.push({
+      pathname: "/checkout",
+      params: {
+        isBuyNow: "true",
+        productId: product._id,
+        variantId: currentVariantId ?? "",
+        quantity: String(quantity),
+        codOnly: priceOnRequest ? "true" : "false",
+      },
+    });
   };
 
   if (loading)
@@ -569,17 +783,50 @@ export default function ProductViewScreen() {
 
   const descriptionText = cleanDescription(product.description);
 
+  // keeps the image (and back button) pinned while the content scrolls over it
+  const heroTranslate = scrollY.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, 1],
+    extrapolateLeft: "clamp",
+  });
+  const blurOpacity = scrollY.interpolate({
+    inputRange: [0, 260],
+    outputRange: [0, 1],
+    extrapolate: "clamp",
+  });
+  const glassOpacity = scrollY.interpolate({
+    inputRange: [0, 220],
+    outputRange: [1, 0],
+    extrapolate: "clamp",
+  });
+  const whiteOpacity = scrollY.interpolate({
+    inputRange: [0, 220],
+    outputRange: [0, 1],
+    extrapolate: "clamp",
+  });
+  const currentMedia = mediaItems[galleryIndex];
+  const blurUri = apiImageUrl(
+    currentMedia?.type === "image" ? currentMedia.uri : imageItems[0]?.uri,
+  );
+
   return (
     <SafeAreaView style={st.screen} edges={["top"]}>
-      <ScrollView
+      <Animated.ScrollView
         contentContainerStyle={[
           st.scrollContent,
           { paddingBottom: 110 + insets.bottom },
         ]}
         showsVerticalScrollIndicator={false}
+        scrollEventThrottle={16}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+          { useNativeDriver: true },
+        )}
       >
         {/* ─── Top Bar ─── */}
-        <View style={st.topBar}>
+        <Animated.View
+          style={[st.topBar, { transform: [{ translateY: heroTranslate }] }]}
+        >
           <Pressable
             accessibilityLabel="Go back"
             onPress={goBackOrHome}
@@ -609,10 +856,15 @@ export default function ProductViewScreen() {
               What are you looking for?
             </ThemedText>
           </View> */}
-        </View>
+        </Animated.View>
 
         {/* ─── Product Image Gallery ─── */}
-        <View style={st.imageStage}>
+        <Animated.View
+          style={[
+            st.imageStage,
+            { transform: [{ translateY: heroTranslate }] },
+          ]}
+        >
           {mediaItems.length > 0 ? (
             <ScrollView
               ref={galleryRef}
@@ -639,11 +891,19 @@ export default function ProductViewScreen() {
                       active={galleryIndex === index}
                     />
                   ) : (
-                    <Image
-                      source={{ uri: apiImageUrl(item.uri) }}
-                      style={st.heroImage}
-                      contentFit="contain"
-                    />
+                    <Pressable
+                      onPress={() =>
+                        setViewerIndex(
+                          imageItems.findIndex((m) => m.uri === item.uri),
+                        )
+                      }
+                    >
+                      <Image
+                        source={{ uri: apiImageUrl(item.uri) }}
+                        style={st.heroImage}
+                        contentFit="cover"
+                      />
+                    </Pressable>
                   )}
                 </View>
               ))}
@@ -653,10 +913,38 @@ export default function ProductViewScreen() {
               <ThemedText style={st.imageFallbackText}>NO IMAGE</ThemedText>
             </View>
           )}
-        </View>
+
+          {/* mild gradient at the bottom of the image */}
+          <LinearGradient
+            pointerEvents="none"
+            colors={[withAlpha(tint, 0), withAlpha(tint, 0.5)]}
+            style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 160 }}
+          />
+
+          {/* blur + dim that fades in while scrolling */}
+          <Animated.View
+            pointerEvents="none"
+            style={[StyleSheet.absoluteFill, { opacity: blurOpacity }]}
+          >
+            {!!blurUri && (
+              <Image
+                source={{ uri: blurUri }}
+                style={StyleSheet.absoluteFill}
+                contentFit="cover"
+                blurRadius={40}
+              />
+            )}
+            <View
+              style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0,0,0,0.25)" }]}
+            />
+          </Animated.View>
+        </Animated.View>
 
         {/* ─── Image Thumbnails / Dots ─── */}
         {mediaItems.length > 1 && (
+          <Animated.View
+            style={[st.thumbPinned, { transform: [{ translateY: heroTranslate }] }]}
+          >
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -688,10 +976,40 @@ export default function ProductViewScreen() {
               </Pressable>
             ))}
           </ScrollView>
+          </Animated.View>
         )}
 
         {/* ─── Product Info Sheet ─── */}
         <View style={st.infoSheet}>
+          {/* solid white below the glass zone */}
+          <View pointerEvents="none" style={st.sheetWhite} />
+
+          {/* frosted glass + mild gradient (fades out on scroll) */}
+          <Animated.View
+            pointerEvents="none"
+            style={[st.glassZone, { opacity: glassOpacity }]}
+          >
+            <BlurView
+              intensity={45}
+              tint="light"
+              experimentalBlurMethod="dimezisBlurView"
+              style={StyleSheet.absoluteFill}
+            />
+            <LinearGradient
+              colors={[
+                withAlpha(tint, 0.4),
+                withAlpha(tint, 0.14),
+                "rgba(255,255,255,1)",
+              ]}
+              style={StyleSheet.absoluteFill}
+            />
+          </Animated.View>
+
+          {/* turns the glass zone solid white as you scroll */}
+          <Animated.View
+            pointerEvents="none"
+            style={[st.glassZone, { backgroundColor: "#FFFFFF", opacity: whiteOpacity }]}
+          />
           {/* Title + Rating Row */}
           <View style={st.titleRow}>
             <View style={st.titleRowLeft}>
@@ -714,58 +1032,67 @@ export default function ProductViewScreen() {
               </View>
             </View>
             <View style={st.titleActions}>
-            <Pressable
-              accessibilityLabel="Share product"
-              style={st.wishlistBtn}
-              onPress={shareProduct}
-            >
-              <SymbolView
-                name={{
-                  ios: "square.and.arrow.up",
-                  android: "share",
-                  web: "share",
-                }}
-                size={20}
-                tintColor={ink}
-              />
-            </Pressable>
-            <Pressable
-              accessibilityLabel="Toggle wishlist"
-              style={st.wishlistBtn}
-              onPress={() =>
-                toggle({
-                  id: product._id,
-                  name: product.title || "",
-                  brand: product.brandId || "",
-                  price: currentPrice,
-                  category: categoryLabel,
-                  image: productImages[0] ?? product.image ?? "",
-                  description: product.description || "",
-                  unit: product.unit,
-                  size: currentSize,
-                })
-              }
-            >
-              <SymbolView
-                name={
-                  isSaved(product._id)
-                    ? {
-                        ios: "heart.fill",
-                        android: "favorite",
-                        web: "favorite",
-                      }
-                    : {
-                        ios: "heart",
-                        android: "favorite_border",
-                        web: "favorite_border",
-                      }
+              <Pressable
+                accessibilityLabel="Share product"
+                style={st.wishlistBtn}
+                onPress={shareProduct}
+              >
+                <SymbolView
+                  name={{
+                    ios: "square.and.arrow.up",
+                    android: "share",
+                    web: "share",
+                  }}
+                  size={20}
+                  tintColor={ink}
+                />
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Toggle wishlist"
+                style={st.wishlistBtn}
+                onPress={() =>
+                  toggle({
+                    id: product._id,
+                    name: product.title || "",
+                    brand: product.brandId || "",
+                    price: currentPrice,
+                    category: categoryLabel,
+                    image: productImages[0] ?? product.image ?? "",
+                    description: product.description || "",
+                    unit: product.unit,
+                    size: currentSize,
+                  })
                 }
-                size={20}
-                tintColor={isSaved(product._id) ? accent : "#CCCCCC"}
-              />
-            </Pressable>
+              >
+                <SymbolView
+                  name={
+                    isSaved(product._id)
+                      ? {
+                          ios: "heart.fill",
+                          android: "favorite",
+                          web: "favorite",
+                        }
+                      : {
+                          ios: "heart",
+                          android: "favorite_border",
+                          web: "favorite_border",
+                        }
+                  }
+                  size={20}
+                  tintColor={isSaved(product._id) ? accent : "#CCCCCC"}
+                />
+              </Pressable>
             </View>
           </View>
+
+          {notDeliverable && (
+            <ThemedText
+              style={{ color: "#E53935", fontWeight: "700", marginTop: 10 }}
+            >
+              {deliveryCheck?.message ??
+                `Not deliverable to your pincode (${pincode})`}
+            </ThemedText>
+          )}
 
           {hasColorVariants && (
             <View style={st.colorSection}>
@@ -852,6 +1179,95 @@ export default function ProductViewScreen() {
               </ScrollView>
             </View>
           )}
+          {/* ─── Price Tiers (quantity pricing) ─── */}
+          {hasTiers && !priceOnRequest && (
+            <View style={st.sizeSection}>
+              <View style={st.sizeSectionHeader}>
+                <ThemedText style={st.sizeSectionTitle}>
+                  Buy More, Pay Less
+                </ThemedText>
+              </View>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={st.variantRow}
+              >
+                {priceTiers.map((t, idx) => {
+                  const isSelected = idx === activeTierIndex;
+                  return (
+                    <Pressable
+                      key={`tier-${idx}`}
+                      style={[
+                        st.variantChip,
+                        st.tierChip,
+                        isSelected && st.variantChipSelected,
+                      ]}
+                      onPress={() => setQuantity(Math.min(maxQty, t.minQty))}
+                    >
+                      <ThemedText
+                        style={[
+                          st.tierQty,
+                          isSelected && st.variantChipTextSelected,
+                        ]}
+                      >
+                        {tierLabel(t)} {unitLabel}
+                      </ThemedText>
+                      <ThemedText
+                        style={[
+                          st.tierPrice,
+                          isSelected && st.variantChipTextSelected,
+                        ]}
+                      >
+                        ₹{t.price}
+                      </ThemedText>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          )}
+
+          {/* ─── Quantity (always shown) ─── */}
+          <View style={st.qtyRow}>
+            <ThemedText style={st.qtyLabel}>Quantity</ThemedText>
+            <View style={st.qtyBox}>
+              <Pressable
+                style={[st.qtyBtn, outOfStock && st.qtyBtnDisabled]}
+                disabled={outOfStock}
+                onPress={() => setQuantity((q) => Math.max(1, q - 1))}
+              >
+                <ThemedText style={st.qtyBtnText}>−</ThemedText>
+              </Pressable>
+              <TextInput
+                value={qtyText}
+                onChangeText={(t) => {
+                  const digits = t.replace(/\D/g, "").slice(0, 5);
+                  setQtyText(digits);
+                  if (digits)
+                    setQuantity(
+                      Math.min(maxQty, Math.max(1, parseInt(digits, 10))),
+                    );
+                }}
+                onBlur={() => setQtyText(String(quantity))}
+                keyboardType="number-pad"
+                editable={!outOfStock}
+                selectTextOnFocus
+                maxLength={5}
+                style={st.qtyInput}
+              />
+              <Pressable
+                style={[
+                  st.qtyBtn,
+                  (outOfStock || quantity >= maxQty) && st.qtyBtnDisabled,
+                ]}
+                disabled={outOfStock || quantity >= maxQty}
+                onPress={() => setQuantity((q) => Math.min(maxQty, q + 1))}
+              >
+                <ThemedText style={st.qtyBtnText}>+</ThemedText>
+              </Pressable>
+            </View>
+          </View>
+
           {/* ─── Product Description ─── */}
           <View style={st.descSection}>
             <ThemedText style={st.descTitle}>Product Description</ThemedText>
@@ -870,138 +1286,211 @@ export default function ProductViewScreen() {
             )}
           </View>
 
-          {/* Price + Quantity Row */}
-          <View style={st.priceQuantityRow}>
-            <View style={st.priceGroup}>
-              {hasDiscount && (
-                <ThemedText style={st.priceOriginal}>
-                  ₹{currentOriginalPrice}
-                </ThemedText>
-              )}
-              <ThemedText style={st.priceMain}>₹{currentPrice}</ThemedText>
-            </View>
-            {/* <View style={st.quantitySelector}>
-    <Pressable
-      style={st.qtyBtn}
-      onPress={() => setQuantity((q) => Math.max(1, q - 1))}
-      accessibilityLabel="Decrease quantity"
-    >
-      <ThemedText style={st.qtyBtnText}>−</ThemedText>
-    </Pressable>
-    <ThemedText style={st.qtyValue}>{quantity}</ThemedText>
-    <Pressable
-      style={st.qtyBtn}
-      onPress={() => setQuantity((q) => q + 1)}
-      accessibilityLabel="Increase quantity"
-    >
-      <ThemedText style={st.qtyBtnText}>+</ThemedText>
-    </Pressable>
-  </View> */}
+          {/* ─── Price block ─── */}
+          {!priceOnRequest && (hasTiers || hasOffer) && (
+            <LinearGradient
+              colors={["#D4145A", "#F15A24"]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={st.dealBadge}
+            >
+              <Text style={st.dealBadgeText}>
+                {hasTiers ? "Bulk deal" : "Special price"}
+              </Text>
+            </LinearGradient>
+          )}
+
+          <View style={st.ppRow}>
+            {hasOffer && (
+              <View style={st.ppPercentRow}>
+                <Ionicons name="arrow-down" size={22} color="#22A45D" />
+                <ThemedText style={st.ppPercent}>{offerPercent}%</ThemedText>
+              </View>
+            )}
+            {hasOffer && (
+              <ThemedText style={st.ppOriginal}>₹{totalOriginal}</ThemedText>
+            )}
+            <ThemedText style={priceOnRequest ? st.ppContact : st.ppPrice}>
+              {priceOnRequest ? "Order to know Price" : `₹${round2(totalPrice)}`}
+            </ThemedText>
+            {!priceOnRequest && quantity > 1 && (
+              <ThemedText style={st.ppTotal}>
+                (₹{currentPrice} × {quantity})
+              </ThemedText>
+            )}
           </View>
 
-          {hasDiscount && (
-            <View style={st.couponAppliedBanner}>
-              <View style={st.couponAppliedIcon}>
-                <Text style={st.couponAppliedIconText}>%</Text>
+          {hasOffer && (
+            <View style={st.ppSave}>
+              <View style={st.ppSaveIcon}>
+                <Text style={st.ppSaveIconText}>%</Text>
               </View>
-              <ThemedText style={st.couponAppliedText}>
-                <ThemedText style={st.couponAppliedAmount}>
-                  ₹{currentOriginalPrice - currentPrice} off{" "}
+              <ThemedText style={st.ppSaveText}>
+                <ThemedText style={st.ppSaveAmount}>
+                  ₹{totalSaved} off{" "}
                 </ThemedText>
                 applied for you
               </ThemedText>
             </View>
           )}
 
-          <View style={st.deliverySection}>
+          {!priceOnRequest && taxInfo.rate > 0 && (
+            <View style={st.gstBox}>
+              <ThemedText style={st.gstText}>
+                {gstInclusive ? "Incl." : "+"} GST {taxInfo.rate}%: ₹{taxInfo.gst}
+              </ThemedText>
+              <ThemedText style={st.gstTotal}>
+                Total payable: ₹{taxInfo.total}
+              </ThemedText>
+            </View>
+          )}
+
+          {priceOnRequest && (
+            <View style={st.codOnlyBox}>
+              <Ionicons name="cash-outline" size={17} color="#B26A00" />
+              <ThemedText style={st.codOnlyText}>
+                You can pay for this only after the store confirms the price. COD & Online pyament available.
+              </ThemedText>
+            </View>
+          )}
+
+          {/* ─── Additional benefits ─── */}
+          <Pressable
+            style={st.bnHeader}
+            onPress={() => setBenefitsOpen((v) => !v)}
+          >
+            <ThemedText style={st.bnTitle}>
+              Additional benefits on this purchase
+            </ThemedText>
+            <Ionicons
+              name={benefitsOpen ? "chevron-up" : "chevron-down"}
+              size={20}
+              color={ink}
+            />
+          </Pressable>
+          {benefitsOpen && (
+            <View style={st.bnBody}>
+              <View style={st.bnRow}>
+                <Ionicons name="cash-outline" size={17} color="#22A45D" />
+                <ThemedText style={st.bnText}>
+                  Cash on Delivery available
+                </ThemedText>
+              </View>
+              {hasOffer && (
+                <View style={st.bnRow}>
+                  <Ionicons name="pricetag-outline" size={17} color="#22A45D" />
+                  <ThemedText style={st.bnText}>
+                    You save ₹{totalSaved} ({offerPercent}%) on this order
+                  </ThemedText>
+                </View>
+              )}
+              {hasTiers && (
+                <View style={st.bnRow}>
+                  <Ionicons name="layers-outline" size={17} color="#22A45D" />
+                  <ThemedText style={st.bnText}>
+                    Buy {priceTiers[priceTiers.length - 1].minQty}+ {unitLabel}{" "}
+                    at ₹{priceTiers[priceTiers.length - 1].price} each
+                  </ThemedText>
+                </View>
+              )}
+              {!!activeStore?.phone && (
+                <View style={st.bnRow}>
+                  <Ionicons name="logo-whatsapp" size={17} color="#22A45D" />
+                  <ThemedText style={st.bnText}>
+                    Chat with the store on WhatsApp
+                  </ThemedText>
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* ─── Delivery details (compact) ─── */}
+          <View style={st.dlSection}>
             <Pressable
-              style={st.deliveryHeader}
+              style={st.dlHeader}
               onPress={() => setDeliveryExpanded((v) => !v)}
             >
-              <ThemedText style={st.deliveryTitle}>Delivery details</ThemedText>
-              <View style={st.deliveryChevronBtn}>
-                <SymbolView
-                  name={{
-                    ios: deliveryExpanded ? "chevron.up" : "chevron.down",
-                    android: deliveryExpanded ? "expand_less" : "expand_more",
-                    web: deliveryExpanded ? "expand_less" : "expand_more",
-                  }}
-                  size={16}
-                  tintColor={ink}
+              <ThemedText style={st.dlTitle}>Delivery details</ThemedText>
+              <View style={st.dlChevronBtn}>
+                <Ionicons
+                  name={deliveryExpanded ? "chevron-up" : "chevron-down"}
+                  size={14}
+                  color={ink}
                 />
               </View>
             </Pressable>
 
             {deliveryExpanded && (
-              <View style={st.deliveryCard}>
+              <View style={st.dlCard}>
                 <Pressable
-                  style={st.deliveryRow}
+                  style={st.dlRow}
                   onPress={() => router.push("/profile")}
                 >
-                  <View style={st.deliveryIconBox}>
-                    <SymbolView
-                      name={{ ios: "house.fill", android: "home", web: "home" }}
-                      size={16}
-                      tintColor={ink}
-                    />
+                  <View style={st.dlIconBox}>
+                    <Ionicons name="home-outline" size={14} color={ink} />
                   </View>
-                  <View style={st.deliveryRowTextWrap}>
+                  <View style={st.dlTextWrap}>
                     {!!hasSavedAddress && (
-                      <ThemedText style={st.deliveryRowBadge}>HOME </ThemedText>
+                      <ThemedText style={st.dlBadge}>HOME </ThemedText>
                     )}
-                    <ThemedText style={st.deliveryRowText} numberOfLines={1}>
+                    <ThemedText style={st.dlText} numberOfLines={1}>
                       {addressPreview}
                     </ThemedText>
                   </View>
-                  <SymbolView
-                    name={{
-                      ios: "chevron.right",
-                      android: "chevron_right",
-                      web: "chevron_right",
-                    }}
-                    size={14}
-                    tintColor={muted}
-                  />
+                  <Ionicons name="chevron-forward" size={14} color={muted} />
                 </Pressable>
 
-                <View style={st.deliveryDivider} />
+                <View style={st.dlDivider} />
 
-                <View style={st.deliveryRow}>
-                  <View style={st.deliveryIconBox}>
-                    <SymbolView
-                      name={{
-                        ios: "shippingbox.fill",
-                        android: "local_shipping",
-                        web: "local_shipping",
-                      }}
-                      size={16}
-                      tintColor={ink}
-                    />
+                <View style={st.dlRow}>
+                  <View style={st.dlIconBox}>
+                    <Ionicons name="car-outline" size={14} color={ink} />
                   </View>
-                  <ThemedText style={st.deliveryRowText}>
+                  <ThemedText style={st.dlText}>
                     Delivery by{" "}
-                    <ThemedText style={st.deliveryRowTextBold}>
-                      {product.deliveryTime || "Same day"}
+                    <ThemedText style={[st.dlText, st.dlBold]}>
+                      {deliveryDateText(liveDelivery, product.deliveryTime)}
                     </ThemedText>
                   </ThemedText>
                 </View>
 
-                <View style={st.deliveryDivider} />
+                {!!shippingChargeText(liveDelivery) && (
+                  <>
+                    <View style={st.dlDivider} />
+                    <View style={st.dlRow}>
+                      <View style={st.dlIconBox}>
+                        <Ionicons name="pricetag-outline" size={14} color={ink} />
+                      </View>
+                      <ThemedText style={st.dlText} numberOfLines={2}>
+                        {shippingChargeText(liveDelivery)}
+                        {liveDelivery?.shippingNote
+                          ? ` · ${liveDelivery.shippingNote}`
+                          : ""}
+                      </ThemedText>
+                    </View>
+                  </>
+                )}
 
-                {/* <View style={st.deliveryRow}>
-        <View style={st.deliveryIconBox}>
-          <SymbolView
-            name={{ ios: "storefront.fill", android: "storefront", web: "storefront" }}
-            size={16}
-            tintColor={ink}
-          />
-        </View>
-        <View style={{ flex: 1 }}>
-          <ThemedText style={st.deliveryRowText}>
-            Sold By {product.brandId || categoryLabel}
-          </ThemedText>
-        </View>
-      </View> */}
+                {!!activeStore?.name && (
+                  <>
+                    <View style={st.dlDivider} />
+                    <View style={st.dlRow}>
+                      <View style={st.dlIconBox}>
+                        <Ionicons
+                          name="storefront-outline"
+                          size={14}
+                          color={ink}
+                        />
+                      </View>
+                      <ThemedText style={st.dlText} numberOfLines={1}>
+                        Sold By{" "}
+                        <ThemedText style={[st.dlText, st.dlBold]}>
+                          {activeStore.name}
+                        </ThemedText>
+                      </ThemedText>
+                    </View>
+                  </>
+                )}
               </View>
             )}
           </View>
@@ -1135,14 +1624,16 @@ export default function ProductViewScreen() {
                             </ThemedText>
                           )}
                         <ThemedText style={st.similarScrollPrice}>
-                          ₹{entry.price}
+                          {entry.price > 0
+                            ? `₹${entry.price}`
+                            : "Order to know Price"}
                         </ThemedText>
                       </View>
 
                       <ThemedText style={st.similarScrollDeliveryText}>
                         Get it by{" "}
                         <ThemedText style={st.similarScrollDeliveryDate}>
-                          {entry.deliveryTime || "Same day"}
+                          {deliveryDateText(entry.delivery, entry.deliveryTime)}
                         </ThemedText>
                       </ThemedText>
                     </Pressable>
@@ -1187,7 +1678,7 @@ export default function ProductViewScreen() {
                   { label: "Category", value: categoryLabel },
                   {
                     label: "Delivery",
-                    value: product.deliveryTime || "Same day",
+                    value: deliveryDateText(liveDelivery, product.deliveryTime),
                   },
                   {
                     label: "Stock",
@@ -1350,7 +1841,9 @@ export default function ProductViewScreen() {
                       {entry.title}
                     </ThemedText>
                     <ThemedText style={st.similarPrice}>
-                      ₹{entry.price}
+                      {entry.price > 0
+                        ? `₹${entry.price}`
+                        : "Order to know Price"}
                     </ThemedText>
                   </Pressable>
                 ))}
@@ -1358,7 +1851,7 @@ export default function ProductViewScreen() {
             </View>
           )}
         </View>
-      </ScrollView>
+      </Animated.ScrollView>
 
       {/* ─── Bottom Action Bar ─── */}
       <Animated.View
@@ -1422,6 +1915,12 @@ export default function ProductViewScreen() {
           </View>
         </Animated.View>
       )}
+      <ImageViewer
+        images={viewerImages}
+        startIndex={Math.max(0, viewerIndex ?? 0)}
+        visible={viewerIndex !== null}
+        onClose={() => setViewerIndex(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -1455,6 +1954,11 @@ const st = StyleSheet.create({
 
   /* ─── Top Bar ─── */
   topBar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 5,
     height: 52,
     paddingHorizontal: 16,
     flexDirection: "row",
@@ -1487,7 +1991,7 @@ const st = StyleSheet.create({
 
   /* ─── Image Gallery ─── */
   imageStage: {
-    height: 320,
+    height: 380,
     backgroundColor: bgLight,
   },
   imageSlide: {
@@ -1496,8 +2000,8 @@ const st = StyleSheet.create({
     justifyContent: "center",
   },
   heroImage: {
-    width: screenWidth * 0.7,
-    height: 300,
+    width: screenWidth,
+    height: 380,
   },
   heroVideo: {
     width: screenWidth * 0.9,
@@ -1547,11 +2051,30 @@ const st = StyleSheet.create({
   },
 
   /* ─── Info Sheet ─── */
-  infoSheet: {
-    paddingHorizontal: 24,
-    paddingTop: 20,
+infoSheet: {
+  paddingHorizontal: 24,
+  paddingTop: 26,
+  marginTop: -2,
+  zIndex: 2,
+  overflow: "hidden",
+  backgroundColor: "transparent",
+},
+  sheetWhite: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: GLASS_H,
+    bottom: 0,
     backgroundColor: "#FFFFFF",
   },
+  glassZone: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    height: GLASS_H,
+  },
+  thumbPinned: { position: "absolute", top: 214, left: 0, right: 0, zIndex: 1 },
 
   /* Title */
   productTitle: {
@@ -1770,7 +2293,7 @@ const st = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingVertical: 14,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: "#F5F5F5",
   },
@@ -2086,6 +2609,163 @@ const st = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
   },
+  dealBadge: {
+    alignSelf: "flex-start",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginTop: 22,
+  },
+  dealBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 0.3,
+  },
+  ppRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 10,
+  },
+  ppPercentRow: { flexDirection: "row", alignItems: "center" },
+  ppPercent: { color: "#22A45D", fontSize: 24, fontWeight: "800" },
+  ppOriginal: {
+    color: "#8A8A8A",
+    fontSize: 20,
+    fontWeight: "600",
+    textDecorationLine: "line-through",
+  },
+  ppPrice: { color: ink, fontSize: 28, fontWeight: "800" },
+  ppContact: { color: accent, fontSize: 22, fontWeight: "800" },
+  codOnlyBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#FFF4DC",
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    marginTop: 14,
+  },
+  codOnlyText: {
+    flex: 1,
+    color: ink,
+    fontSize: 12,
+    fontWeight: "500",
+    lineHeight: 17,
+  },
+  ppTotal: { color: muted, fontSize: 14, fontWeight: "600" },
+  gstBox: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#F3F8FC",
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginTop: 10,
+  },
+  gstText: { fontSize: 13, fontWeight: "600", color: muted },
+  gstTotal: { fontSize: 14, fontWeight: "800", color: ink },
+  ppSave: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#E6F8EE",
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    marginTop: 14,
+  },
+  ppSaveIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: "#22A45D",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  ppSaveIconText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
+  ppSaveText: { fontSize: 14, color: ink },
+  ppSaveAmount: { fontWeight: "800", color: ink },
+
+  bnHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#F5F5F5",
+    borderRadius: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    marginTop: 14,
+  },
+  bnTitle: {
+    flex: 1,
+    color: ink,
+    fontSize: 14,
+    fontWeight: "700",
+    marginRight: 8,
+  },
+  bnBody: {
+    backgroundColor: "#F5F5F5",
+    borderRadius: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginTop: 6,
+    gap: 10,
+  },
+  bnRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  bnText: { flex: 1, color: ink, fontSize: 13, fontWeight: "500" },
+
+  dlSection: { marginTop: 18 },
+  dlHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  dlTitle: { fontSize: 15, fontWeight: "800", color: ink },
+  dlChevronBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    backgroundColor: "#F5F5F5",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dlCard: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: "#E4E4E4",
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    backgroundColor: "#FFFFFF",
+  },
+  dlRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 8,
+  },
+  dlIconBox: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    backgroundColor: "#F5F5F5",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dlTextWrap: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+  },
+  dlBadge: { fontSize: 12, fontWeight: "800", color: ink },
+  dlText: { flex: 1, fontSize: 12, fontWeight: "500", color: ink },
+  dlBold: { fontWeight: "600", color: "#1B7F4B" },
+  dlDivider: { height: 1, backgroundColor: "#EFEFEF" },
   deliverySection: {
     marginTop: 24,
     backgroundColor: "#F3F8FC",
@@ -2336,4 +3016,46 @@ const st = StyleSheet.create({
     justifyContent: "space-between",
   },
   seeAllText: { fontSize: 14, fontWeight: "700", color: accent },
+  tierChip: { alignItems: "center", minWidth: 96 },
+  tierQty: { fontSize: 12, fontWeight: "600", color: muted },
+  tierPrice: { fontSize: 15, fontWeight: "800", color: ink, marginTop: 2 },
+  qtyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 14,
+  },
+  qtyLabel: { fontSize: 14, fontWeight: "600", color: muted },
+  qtyBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1.5,
+    borderColor: "#E8E8E8",
+    borderRadius: 12,
+  },
+  qtyBtn: {
+    width: 38,
+    height: 38,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qtyBtnText: { fontSize: 20, fontWeight: "700", color: ink },
+  qtyBtnDisabled: { opacity: 0.3 },
+  qtyValue: {
+    minWidth: 34,
+    textAlign: "center",
+    fontSize: 15,
+    fontWeight: "800",
+    color: ink,
+  },
+  priceTotal: { fontSize: 14, fontWeight: "600", color: muted },
+  qtyInput: {
+    minWidth: 56,
+    height: 38,
+    textAlign: "center",
+    fontSize: 15,
+    fontWeight: "800",
+    color: ink,
+    paddingVertical: 0,
+  },
 });

@@ -1,10 +1,10 @@
 import { Image } from "expo-image";
 import { router } from "expo-router";
-import { SymbolView } from "expo-symbols";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { ThemedText } from "@/components/themed-text";
 import { apiImageUrl, type ApiProduct } from "@/lib/api";
+import { deliveryDateText } from "@/lib/delivery-text";
 
 const ink = "#1A1A1A";
 const muted = "#999999";
@@ -93,16 +93,26 @@ export function ProductRail({
                     </ThemedText>
                   )}
                 <ThemedText style={styles.price}>
-                  {product.price > 0 ? `₹${product.price}` : "PRICE ON REQUEST"}
+                  {product.price > 0
+                    ? `₹${product.price}`
+                    : "CLICK ORDER FOR PRICE"}
                 </ThemedText>
               </View>
 
-              <ThemedText style={styles.deliveryText}>
-                Get it by{" "}
-                <ThemedText style={styles.deliveryDate}>
-                  {product.deliveryTime || "Same day"}
+              {product.delivery?.deliverable === false ? (
+                <ThemedText style={[styles.deliveryText, { color: "#E53935" }]}>
+                  Not deliverable to your pincode
                 </ThemedText>
-              </ThemedText>
+              ) : (
+                (!!product.delivery || !!product.deliveryTime) && (
+                  <ThemedText style={styles.deliveryText}>
+                    Get it by{" "}
+                    <ThemedText style={styles.deliveryDate}>
+                      {deliveryDateText(product.delivery, product.deliveryTime)}
+                    </ThemedText>
+                  </ThemedText>
+                )
+              )}
             </Pressable>
           );
         })}
@@ -199,13 +209,13 @@ const styles = StyleSheet.create({
   },
   deliveryText: {
     fontSize: 12,
-    fontWeight: "500",
-    color: muted,
+    fontWeight: "400",
+    color: "#8A8A8A",
+    letterSpacing: 0.1,
     marginTop: 4,
   },
   deliveryDate: {
-    fontWeight: "800",
-    color: ink,
+    fontWeight: "600",
+    color: "#1B7F4B",
   },
-  
 });
